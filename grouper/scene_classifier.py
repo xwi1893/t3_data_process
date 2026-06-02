@@ -8,17 +8,18 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import SCENE_LABEL_MAP
+from config import SCENE_LABEL_MAP, COMPOUND_LABEL_RULES
 
 
 def classify_frame(labels: List[str]) -> Optional[Tuple[int, str, str]]:
     """根据帧标签列表初步判定场景类型
 
-    遍历标签列表，匹配 SCENE_LABEL_MAP 中第一个有效标签。
-    一帧可能有多个标签，返回第一个匹配的场景。
+    匹配规则 (按优先级):
+    1. 复合标签规则: 需要多个标签同时存在 (如路口停车需 at_intersection + brake2stop)
+    2. 单标签规则: 遍历标签列表，匹配 SCENE_LABEL_MAP 中第一个有效标签
 
     Args:
-        labels: 帧标签列表, 如 ["brake", "at_intersection", "across"]
+        labels: 帧标签列表, 如 ["brake2stop", "at_intersection", "across"]
 
     Returns:
         (scene_type, scene_name_cn, scene_name_en) 或 None (忽略该帧)
@@ -29,6 +30,14 @@ def classify_frame(labels: List[str]) -> Optional[Tuple[int, str, str]]:
     if not labels:
         return None
 
+    label_set = set(labels)
+
+    # 优先检查复合标签规则
+    for rule in COMPOUND_LABEL_RULES:
+        if rule["required_labels"].issubset(label_set):
+            return rule["result"]
+
+    # 单标签规则: 按标签列表顺序匹配第一个
     for label in labels:
         if label in SCENE_LABEL_MAP:
             return SCENE_LABEL_MAP[label]

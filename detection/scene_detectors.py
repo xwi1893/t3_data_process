@@ -18,7 +18,7 @@ from config import DETECTION_PARAMS, FEATURE_PARAMS
 from utils.frame_utils import (
     get_lead_vehicle, calculate_lateral_position,
     check_has_stopline, check_has_traffic_light,
-    smooth_lead_distance,
+    get_lane_boundaries, smooth_lead_distance,
 )
 
 
@@ -84,8 +84,6 @@ def extract_segment_features(
         lat_pos, curv = calculate_lateral_position(lanelines)
 
         # 车道宽度
-        _, _, lw = get_lead_vehicle.__code__  # 简化: 使用默认
-        from utils.frame_utils import get_lane_boundaries
         _, _, lw = get_lane_boundaries(lanelines)
 
         # 路口检测

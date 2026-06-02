@@ -5,15 +5,24 @@
 - 场景标签映射（阶段1初步筛选）
 - 合规检查阈值
 - 片段合并参数
-- 时间窗口扩展参数
 - 数据路径配置
 """
 
 # === 场景标签映射 (阶段1: 标签初步筛选) ===
 # frame_scene.json 中的标签 → (scene_type, 中文名, 英文名)
-# 一帧有多个标签时，按此表匹配第一个有效标签；均无效则忽略
+# 匹配规则: 先检查复合标签规则 (需多个标签同时存在), 再检查单标签规则
+
+# 复合标签规则: 需要多个标签同时存在才能匹配场景
+# 格式: {"required_labels": [...], "result": (scene_type, 中文名, 英文名)}
+COMPOUND_LABEL_RULES = [
+    {
+        "required_labels": {"at_intersection", "brake2stop"},
+        "result": (1, "路口停车", "intersection_stop"),
+    },
+]
+
+# 单标签规则: 单个标签即可匹配
 SCENE_LABEL_MAP = {
-    "at_intersection":                                (1, "路口停车", "intersection_stop"),
     "static2move":                                    (2, "起步",     "empty_start"),
     "longi_interaction_follow_front_large_vehicle":   (3, "跟车",     "following_vehicle"),
     "longi_interaction_follow_front_small_vehicle":   (3, "跟车",     "following_vehicle"),
@@ -24,6 +33,7 @@ SCENE_LABEL_MAP = {
 
 # 场景类型 → 英文名的反向映射（方便查找）
 SCENE_TYPE_NAMES = {v[0]: v[2] for v in SCENE_LABEL_MAP.values()}
+SCENE_TYPE_NAMES[1] = "intersection_stop"  # 复合规则补充
 
 # === 合规检查参数 ===
 # 先沿用参考项目参数，后续可通过 JSON 配置文件覆盖
@@ -42,15 +52,9 @@ COMPLIANCE_PARAMS = {
 # === 片段合并参数 ===
 MERGE_PARAMS = {
     "max_gap_seconds": 0.5,            # 允许的最大帧间隔(秒), 约5帧
-    "min_segment_duration": 3.0,       # 最短片段时长(秒)
+    "min_segment_duration": 1.0,       # 最短片段时长(秒)
     "fps": 10,                         # 帧率
     "frame_interval_ns": 100_000_000,  # ~0.1s = 100ms (纳秒)
-}
-
-# === 时间窗口扩展 ===
-WINDOW_EXTENSION = {
-    "max_extend_seconds": 5.0,         # 最大扩展秒数
-    "stop_labels": {"error_data"},     # 遇到这些标签停止扩展
 }
 
 # === 检测确认参数 (阶段2: 算法二次确认) ===
@@ -104,9 +108,8 @@ FEATURE_PARAMS = {
 # === 数据路径配置 ===
 # 用户需根据实际环境填写
 DATA_PATHS = {
-    "frame_scene_base_dir": "",        # frame_scene.json 所在基础目录
-    "driver_split_file": "",           # driver_split.json 路径
-    "date_split_file": "",             # date_split.json 路径
-    "pb_data_base_dir": "",            # pb 数据文件所在基础目录
-    "output_dir": "",                  # 输出目录
+    "driver_split_file": "./reference/driver_split.json",   # driver_split.json 路径
+    "data_batch_file": "/root/export/xuewei/data_batch_full.json",                                  # data_batch.json 路径 (记录所有 batch 目录)
+    "t3_root_dir": "/root/t3-data/Preproduction_Data",     # cloud_path 中 gt_label 之前的前缀替换为此路径
+    "output_dir": "./results",                              # 输出目录
 }

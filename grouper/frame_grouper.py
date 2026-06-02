@@ -13,6 +13,7 @@ from data_loader.index_loader import (
     lookup_driver_id,
     parse_directory_key,
 )
+from config import DATA_PATHS
 from grouper.scene_classifier import classify_frame_scene_all
 
 
@@ -50,7 +51,14 @@ def group_frames(
         print(f"[grouper] 警告: 未找到 {dir_key} 对应的驾驶员ID，跳过")
         return {}
 
-    cloud_path = date_split.get(dir_key, "")
+    raw_cloud_path = date_split.get(dir_key, "")
+    # 将 gt_label 之前的前缀替换为 config.t3_root_dir，并追加 one_frame_all_data 子目录
+    gt_idx = raw_cloud_path.find("gt_label")
+    if gt_idx != -1:
+        t3_root = DATA_PATHS["t3_root_dir"].rstrip("/")
+        cloud_path = f"{t3_root}/{raw_cloud_path[gt_idx:]}/one_frame_all_data"
+    else:
+        cloud_path = raw_cloud_path.rstrip("/") + "/one_frame_all_data" if raw_cloud_path else ""
 
     # 标签分类
     classified = classify_frame_scene_all(frame_scene)

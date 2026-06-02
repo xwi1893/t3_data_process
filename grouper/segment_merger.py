@@ -1,15 +1,14 @@
 """
 segment_merger.py
-合并连续帧为场景片段 + 时间窗口扩展
+合并连续帧为场景片段
 """
 
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import MERGE_PARAMS, WINDOW_EXTENSION
-from data_loader.index_loader import extract_timestamp_from_pb_filename
+from config import MERGE_PARAMS
 
 
 def merge_into_segments(
@@ -86,99 +85,6 @@ def merge_into_segments(
           f"{len(result)} 个有效片段 (过滤 <{min_segment_duration}s)")
 
     return result
-
-
-def extend_time_window(
-    segment: dict,
-    frame_scene: dict,
-    all_pb_files_sorted: List[str],
-    max_extend_seconds: float = WINDOW_EXTENSION["max_extend_seconds"],
-    stop_labels: Set[str] = WINDOW_EXTENSION["stop_labels"],
-) -> dict:
-    """使用 frame_scene.json 扩展场景片段的时间窗口
-
-    从片段边界向前/后扩展，直到:
-    - 达到最大扩展秒数
-    - 遇到 stop_labels 中的标签 (如 error_data)
-    - 到达文件列表边界
-
-    Args:
-        segment: 场景片段 dict
-        frame_scene: {pb_filename: [labels]} 全部帧标签
-        all_pb_files_sorted: 该目录下所有pb文件名(按时间排序)
-        max_extend_seconds: 最大扩展秒数
-        stop_labels: 停止扩展的标签集合
-
-    Returns:
-        更新后的 segment (pb_files 和 timestamp 已扩展)
-    """
-    if not all_pb_files_sorted:
-        return segment
-
-    max_extend_ns = int(max_extend_seconds * 1e9)
-    pb_set = set(segment['pb_files'])
-    start_ts = segment['start_timestamp_ns']
-    end_ts = segment['end_timestamp_ns']
-
-    # 构建文件名到排序索引的映射
-    file_to_idx = {f: i for i, f in enumerate(all_pb_files_sorted)}
-
-    # 找到当前片段在排序列表中的边界
-    first_file = segment['pb_files'][0]
-    last_file = segment['pb_files'][-1]
-    first_idx = file_to_idx.get(first_file, 0)
-    last_idx = file_to_idx.get(last_file, len(all_pb_files_sorted) - 1)
-
-    # 向前扩展
-    new_first_idx = first_idx
-    for i in range(first_idx - 1, -1, -1):
-        fname = all_pb_files_sorted[i]
-        ts = extract_timestamp_from_pb_filename(fname)
-        if start_ts - ts > max_extend_ns:
-            break
-        labels = frame_scene.get(fname, [])
-        if any(l in stop_labels for l in labels):
-            break
-        pb_set.add(fname)
-        new_first_idx = i
-
-    # 向后扩展
-    new_last_idx = last_idx
-    for i in range(last_idx + 1, len(all_pb_files_sorted)):
-        fname = all_pb_files_sorted[i]
-        ts = extract_timestamp_from_pb_filename(fname)
-        if ts - end_ts > max_extend_ns:
-            break
-        labels = frame_scene.get(fname, [])
-        if any(l in stop_labels for l in labels):
-            break
-        pb_set.add(fname)
-        new_last_idx = i
-
-    # 重建有序的 pb_files 列表
-    extended_files = [
-        all_pb_files_sorted[i]
-        for i in range(new_first_idx, new_last_idx + 1)
-        if all_pb_files_sorted[i] in pb_set
-    ]
-
-    if len(extended_files) > len(segment['pb_files']):
-        old_count = segment['frame_count']
-        segment['pb_files'] = extended_files
-        segment['start_timestamp_ns'] = extract_timestamp_from_pb_filename(
-            extended_files[0]
-        )
-        segment['end_timestamp_ns'] = extract_timestamp_from_pb_filename(
-            extended_files[-1]
-        )
-        segment['duration_sec'] = (
-            (segment['end_timestamp_ns'] - segment['start_timestamp_ns']) / 1e9
-        )
-        segment['frame_count'] = len(extended_files)
-        print(f"[merger] 时间窗口扩展: {old_count} -> {len(extended_files)} 帧, "
-              f"时长 {segment['duration_sec']:.1f}s")
-
-    return segment
 
 
 def group_and_merge(

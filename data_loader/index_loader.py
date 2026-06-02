@@ -59,6 +59,38 @@ def load_date_split(path: str) -> Dict[str, str]:
     return data
 
 
+def load_data_batch(path: str) -> List[str]:
+    """加载 data_batch.json
+    返回: batch 目录路径列表
+    """
+    data = load_json(path)
+    if not isinstance(data, list):
+        raise ValueError(f"data_batch.json 应为列表格式: {path}")
+    print(f"[index_loader] 加载 data_batch: {len(data)} 个 batch 目录")
+    return data
+
+
+def load_merged_date_split(batch_dirs: List[str]) -> Dict[str, str]:
+    """加载并合并所有 batch 的 date_split.json
+
+    Args:
+        batch_dirs: batch 目录路径列表
+
+    Returns:
+        合并后的 {dir_key: cloud_path}
+    """
+    merged = {}
+    for batch_dir in batch_dirs:
+        ds_path = os.path.join(batch_dir, "date_split.json")
+        if not os.path.exists(ds_path):
+            print(f"[index_loader] 警告: date_split.json 不存在: {ds_path}")
+            continue
+        ds = load_json(ds_path)
+        merged.update(ds)
+    print(f"[index_loader] 合并 date_split: {len(merged)} 条记录 (来自 {len(batch_dirs)} 个 batch)")
+    return merged
+
+
 def load_frame_scene(path: str) -> Dict[str, List[str]]:
     """加载单个 frame_scene.json
     返回: {pb_filename: [labels]}

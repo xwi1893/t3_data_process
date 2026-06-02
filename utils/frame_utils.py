@@ -294,24 +294,27 @@ def check_has_traffic_light(frame: dict, distance_threshold: float = 50.0) -> bo
         distance_threshold: 检测距离 (米)
 
     Returns:
-        True: 前方有有效信号灯 (state >= 3 且距离 < threshold)
+        True: 前方有有效信号灯 (status >= 1 即红/黄/绿均算，且距离 < threshold)
     """
     ego_status = frame.get('data_ego_curr_status', {})
     lights = ego_status.get('egolane_traffic_lights', [])
 
-    if not lights or lights[0] < 3:
+    if not lights:
         return False
 
-    positions = ego_status.get('egolane_traffic_lights_pos', [])
-    if not positions:
-        return True  # 无位置信息，保守返回 True
+    # lights 结构: [{'node_id': int, 'status': int, 'countdown': float,
+    #                 'pos_x': float, 'pos_y': float, 'type': int}, ...]
+    first_light = lights[0]
+    if not isinstance(first_light, dict):
+        return False
 
-    pos = positions[0]
-    if not isinstance(pos, dict):
-        return True
+    # status: 0=无效, 1=红, 2=黄, 3=绿; 有效灯色(>=1)均视为路口标志
+    status = first_light.get('status', 0)
+    if status < 1:
+        return False
 
-    light_x = pos.get('x', float('inf'))
-    light_y = pos.get('y', 0.0)
+    light_x = first_light.get('pos_x', 0.0)
+    light_y = first_light.get('pos_y', 0.0)
 
     if light_x <= 0:
         return False
