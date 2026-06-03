@@ -152,7 +152,9 @@ def run_pipeline(
     # ===== Stage 3: date_split 加载与合并 =====
     print("\n[Stage 3] date_split 加载与合并")
     use_cache = PERFORMANCE_CFG.get("use_date_split_cache", True)
-    date_split = load_merged_date_split(batch_dirs, use_cache=use_cache)
+    batch_workers = PERFORMANCE_CFG.get("batch_workers", 0)
+    date_split = load_merged_date_split(batch_dirs, use_cache=use_cache,
+                                         max_workers=batch_workers)
     if not date_split:
         print("[警告] date_split 为空")
         return {"error": "无 date_split 数据"}

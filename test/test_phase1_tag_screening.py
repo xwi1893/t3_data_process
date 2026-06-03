@@ -101,9 +101,11 @@ def test_load_indexes(data_batch_path, driver_split_path, max_batches):
         for bd in batch_dirs:
             print(f"    {bd}")
 
-    # 合并 date_split (支持缓存)
+    # 合并 date_split (支持缓存 + 并行加载)
     use_cache = PERFORMANCE_CFG.get("use_date_split_cache", True)
-    date_split = load_merged_date_split(batch_dirs, use_cache=use_cache)
+    batch_workers = PERFORMANCE_CFG.get("batch_workers", 0)
+    date_split = load_merged_date_split(batch_dirs, use_cache=use_cache,
+                                         max_workers=batch_workers)
     print_result("date_split 条目", len(date_split))
 
     return driver_reverse_index, batch_dirs, date_split
@@ -173,69 +175,60 @@ def test_classify_labels(sample_frame_scenes):
     return total_classified > 0
 
 
-def _process_batch_for_test(
-    batch_dir, driver_reverse_index, date_split,
-    target_labels, use_prescreen, max_dirs,
+def _process_dir_for_test(
+    batch_dir, dir_key, driver_reverse_index, date_split,
+    target_labels, use_prescreen,
 ):
-    """处理单个 batch 用于测试，返回 (segments, stats_dict)
+    """处理单个 (batch, dir_key) 目录，返回 (segments, stat_str)
 
-    支持多进程调用: 返回值均为可序列化类型
+    目录级并行 worker: 支持多进程调用，返回值均可序列化
     """
     from data_loader.index_loader import (
         load_frame_scene, lookup_driver_id, check_label_prescreen,
     )
     from grouper.segment_merger import group_and_merge
 
-    segments = []
-    stats = {"total_dirs": 0, "skipped_no_driver": 0,
-             "skipped_prescreen": 0, "skipped_no_scene": 0, "processed": 0}
+    batch_name = os.path.basename(batch_dir)
+    dir_path = os.path.join(batch_dir, "date", dir_key)
 
-    date_dir = os.path.join(batch_dir, "date")
-    if not os.path.isdir(date_dir):
-        return segments, stats
+    # 验证 driver_id
+    driver_id = lookup_driver_id(dir_key, driver_reverse_index)
+    if driver_id is None:
+        return [], "no_driver"
 
-    dir_keys = [
-        d for d in os.listdir(date_dir)
-        if os.path.isdir(os.path.join(date_dir, d))
-    ]
-    if max_dirs > 0:
-        dir_keys = dir_keys[:max_dirs]
+    # 预筛
+    if use_prescreen and not check_label_prescreen(dir_path, target_labels):
+        return [], "prescreen"
 
-    for dir_key in dir_keys:
-        stats["total_dirs"] += 1
-        dir_path = os.path.join(date_dir, dir_key)
+    # 加载 frame_scene.json
+    fs_path = os.path.join(dir_path, "frame_scene.json")
+    if not os.path.exists(fs_path):
+        return [], "no_scene"
 
-        # 验证 driver_id
-        driver_id = lookup_driver_id(dir_key, driver_reverse_index)
-        if driver_id is None:
-            stats["skipped_no_driver"] += 1
-            continue
+    frame_scene = load_frame_scene(fs_path)
+    segs = group_and_merge(
+        frame_scene, dir_key, driver_reverse_index, date_split
+    )
+    for seg in segs:
+        seg['batch'] = batch_name
+    return segs, "processed"
 
-        # 预筛
-        if use_prescreen and not check_label_prescreen(dir_path, target_labels):
-            stats["skipped_prescreen"] += 1
-            continue
 
-        # 加载 frame_scene.json
-        fs_path = os.path.join(dir_path, "frame_scene.json")
-        if not os.path.exists(fs_path):
-            stats["skipped_no_scene"] += 1
-            continue
-
-        stats["processed"] += 1
-        frame_scene = load_frame_scene(fs_path)
-        batch_segs = group_and_merge(
-            frame_scene, dir_key, driver_reverse_index, date_split
-        )
-        for seg in batch_segs:
-            seg['batch'] = os.path.basename(batch_dir)
-        segments.extend(batch_segs)
-
-    return segments, stats
+def _scan_date_dirs(date_dir):
+    """扫描 date 目录下的子目录名称列表 (多进程 worker)"""
+    dir_keys = []
+    try:
+        with os.scandir(date_dir) as it:
+            for entry in it:
+                if entry.is_dir():
+                    dir_keys.append(entry.name)
+    except OSError:
+        pass
+    return dir_keys
 
 
 def test_group_and_merge(batch_dirs, driver_reverse_index, date_split, max_dirs):
-    """测试3: 分组 + 合并 (支持多进程并行 + tqdm 进度条)"""
+    """测试3: 分组 + 合并 (目录级多进程并行 + tqdm 进度条)"""
     print_header("测试3: 分组 + 合并")
 
     target_labels = _get_target_labels()
@@ -243,43 +236,92 @@ def test_group_and_merge(batch_dirs, driver_reverse_index, date_split, max_dirs)
     batch_workers = PERFORMANCE_CFG.get("batch_workers", 0)
     tqdm_bar = _get_tqdm()
 
+    # 收集所有待处理的 (batch_dir, dir_key) 工作项
+    # 并行扫描: 将每个 batch 的目录扫描分发给 worker 进程
+    work_items = []
+    scan_jobs = []
+    for batch_dir in batch_dirs:
+        date_dir = os.path.join(batch_dir, "date")
+        if not os.path.isdir(date_dir):
+            continue
+        scan_jobs.append((batch_dir, date_dir))
+
+    if batch_workers > 1 and len(scan_jobs) > 1:
+        # === 并行扫描 (目录级) ===
+        with ProcessPoolExecutor(max_workers=batch_workers) as pool:
+            futures = {
+                pool.submit(_scan_date_dirs, dd): bd
+                for bd, dd in scan_jobs
+            }
+            for fut in tqdm_bar(as_completed(futures), total=len(futures),
+                                desc="  目录扫描"):
+                bd = futures[fut]
+                try:
+                    dir_keys = fut.result()
+                except Exception:
+                    continue
+                if max_dirs > 0:
+                    dir_keys = dir_keys[:max_dirs]
+                for dk in dir_keys:
+                    work_items.append((bd, dk))
+    else:
+        # === 串行扫描 ===
+        for bd, dd in scan_jobs:
+            dir_keys = _scan_date_dirs(dd)
+            if max_dirs > 0:
+                dir_keys = dir_keys[:max_dirs]
+            for dk in dir_keys:
+                work_items.append((bd, dk))
+
+    print(f"  工作项: {len(work_items)} 个目录")
+
     all_segments = []
     merged_stats = {
-        "total_dirs": 0, "skipped_no_driver": 0,
-        "skipped_prescreen": 0, "skipped_no_scene": 0, "processed": 0,
+        "total_dirs": len(work_items),
+        "skipped_no_driver": 0, "skipped_prescreen": 0,
+        "skipped_no_scene": 0, "processed": 0,
+    }
+    stat_map = {
+        "no_driver": "skipped_no_driver",
+        "prescreen": "skipped_prescreen",
+        "no_scene": "skipped_no_scene",
+        "processed": "processed",
     }
 
-    if batch_workers > 1 and len(batch_dirs) > 1:
-        # === 多进程并行 ===
+    if batch_workers > 1 and len(work_items) > 1:
+        # === 多进程并行 (目录级) ===
         print(f"  多进程模式: {batch_workers} 个 worker")
         with ProcessPoolExecutor(max_workers=batch_workers) as pool:
             futures = {
                 pool.submit(
-                    _process_batch_for_test,
-                    bd, driver_reverse_index, date_split,
-                    target_labels, use_prescreen, max_dirs,
-                ): bd
-                for bd in batch_dirs
+                    _process_dir_for_test,
+                    bd, dk, driver_reverse_index, date_split,
+                    target_labels, use_prescreen,
+                ): (bd, dk)
+                for bd, dk in work_items
             }
             for fut in tqdm_bar(as_completed(futures), total=len(futures),
-                                desc="  batch 处理"):
+                                desc="  目录处理"):
                 try:
-                    segs, st = fut.result()
+                    segs, stat = fut.result()
                     all_segments.extend(segs)
-                    for k in merged_stats:
-                        merged_stats[k] += st[k]
+                    key = stat_map.get(stat)
+                    if key:
+                        merged_stats[key] += 1
                 except Exception as e:
-                    print(f"\n  [错误] batch {futures[fut]}: {e}")
+                    bd, dk = futures[fut]
+                    print(f"\n  [错误] {os.path.basename(bd)}/{dk}: {e}")
     else:
         # === 单进程串行 ===
-        for batch_dir in tqdm_bar(batch_dirs, desc="  batch 处理"):
-            segs, st = _process_batch_for_test(
-                batch_dir, driver_reverse_index, date_split,
-                target_labels, use_prescreen, max_dirs,
+        for bd, dk in tqdm_bar(work_items, desc="  目录处理"):
+            segs, stat = _process_dir_for_test(
+                bd, dk, driver_reverse_index, date_split,
+                target_labels, use_prescreen,
             )
             all_segments.extend(segs)
-            for k in merged_stats:
-                merged_stats[k] += st[k]
+            key = stat_map.get(stat)
+            if key:
+                merged_stats[key] += 1
 
     # 汇总
     scene_names = {1: "路口停车", 2: "起步", 3: "跟车", 4: "跟停", 5: "变道"}
