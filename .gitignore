@@ -1,4 +1,6 @@
 __pycache__
 .qodercn
 reference
-test
+.cache
+test/downloads
+test/test_output

@@ -13,16 +13,17 @@ import json
 import os
 import sys
 from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
-from config import DATA_PATHS
+from config import DATA_PATHS, PERFORMANCE_CFG, SCENE_LABEL_MAP, COMPOUND_LABEL_RULES
 from data_loader.index_loader import (
     load_driver_split, build_driver_reverse_index,
     load_data_batch, load_merged_date_split,
-    load_frame_scene, lookup_driver_id,
+    load_frame_scene, lookup_driver_id, check_label_prescreen,
 )
 from data_loader.pb_loader import load_frames_by_files
 from grouper.segment_merger import group_and_sample
@@ -35,12 +36,85 @@ from output.training_manifest import write_manifest
 from output.feature_writer import write_features
 
 
+def _get_tqdm():
+    """获取 tqdm 进度条，若未安装则回退到无操作"""
+    if not PERFORMANCE_CFG.get("progress_bar", True):
+        return lambda x, **kw: x
+    try:
+        from tqdm import tqdm
+        return tqdm
+    except ImportError:
+        return lambda x, **kw: x
+
+
+def _get_target_labels() -> set:
+    """获取所有目标标签集合 (用于预筛)"""
+    labels = set(SCENE_LABEL_MAP.keys())
+    for rule in COMPOUND_LABEL_RULES:
+        labels.update(rule["required_labels"])
+    return labels
+
+
 def load_config_override(config_path: str) -> dict:
     """加载配置覆盖文件"""
     if not config_path or not os.path.exists(config_path):
         return {}
     with open(config_path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def _process_single_batch(
+    batch_dir: str,
+    driver_reverse_index: dict,
+    date_split: dict,
+    target_labels: set,
+    use_prescreen: bool,
+) -> list:
+    """处理单个 batch 的 dir_key 目录，返回候选片段列表
+
+    可作为 ProcessPoolExecutor 的 worker 函数
+
+    Args:
+        batch_dir: batch 目录路径
+        driver_reverse_index: (date, vehicle_id) -> driver_id
+        date_split: {dir_key: cloud_path}
+        target_labels: 目标标签集合 (用于预筛)
+        use_prescreen: 是否启用 label_count.json 预筛
+
+    Returns:
+        候选片段列表
+    """
+    segments = []
+    date_dir = os.path.join(batch_dir, "date")
+    if not os.path.isdir(date_dir):
+        return segments
+
+    for dir_key in os.listdir(date_dir):
+        dir_path = os.path.join(date_dir, dir_key)
+        if not os.path.isdir(dir_path):
+            continue
+
+        # 验证 driver_id
+        driver_id = lookup_driver_id(dir_key, driver_reverse_index)
+        if driver_id is None:
+            continue
+
+        # 预筛: 通过 label_count.json 快速判断是否包含目标标签
+        if use_prescreen and not check_label_prescreen(dir_path, target_labels):
+            continue
+
+        # 加载 frame_scene.json
+        fs_path = os.path.join(dir_path, "frame_scene.json")
+        if not os.path.exists(fs_path):
+            continue
+
+        frame_scene = load_frame_scene(fs_path)
+        batch_samples = group_and_sample(
+            frame_scene, dir_key, driver_reverse_index, date_split
+        )
+        segments.extend(batch_samples)
+
+    return segments
 
 
 def run_pipeline(
@@ -77,7 +151,10 @@ def run_pipeline(
 
     # ===== Stage 3: date_split 加载与合并 =====
     print("\n[Stage 3] date_split 加载与合并")
-    date_split = load_merged_date_split(batch_dirs)
+    use_cache = PERFORMANCE_CFG.get("use_date_split_cache", True)
+    batch_workers = PERFORMANCE_CFG.get("batch_workers", 0)
+    date_split = load_merged_date_split(batch_dirs, use_cache=use_cache,
+                                         max_workers=batch_workers)
     if not date_split:
         print("[警告] date_split 为空")
         return {"error": "无 date_split 数据"}

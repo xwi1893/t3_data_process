@@ -9,7 +9,10 @@ index_loader.py
 import json
 import os
 import re
+import pickle
+import hashlib
 from typing import Dict, List, Tuple, Optional
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 def load_json(path: str) -> dict:
@@ -70,24 +73,92 @@ def load_data_batch(path: str) -> List[str]:
     return data
 
 
-def load_merged_date_split(batch_dirs: List[str]) -> Dict[str, str]:
+def _load_single_date_split(ds_path: str) -> Tuple[str, dict]:
+    """加载单个 date_split.json (多进程 worker)
+
+    Returns:
+        (path, data) 元组; 加载失败时 data 为空 dict
+    """
+    if not os.path.exists(ds_path):
+        return ds_path, {}
+    try:
+        with open(ds_path, 'r', encoding='utf-8') as f:
+            return ds_path, json.load(f)
+    except Exception:
+        return ds_path, {}
+
+
+def load_merged_date_split(
+    batch_dirs: List[str], use_cache: bool = True, max_workers: int = 0,
+) -> Dict[str, str]:
     """加载并合并所有 batch 的 date_split.json
+
+    支持 pickle 缓存: 若 batch_dirs 未变化，直接加载缓存跳过 JSON 解析
+    支持多进程并行加载: max_workers > 1 时并行读取 date_split.json
 
     Args:
         batch_dirs: batch 目录路径列表
+        use_cache: 是否启用缓存
+        max_workers: 并行加载 worker 数 (0=串行)
 
     Returns:
         合并后的 {dir_key: cloud_path}
     """
-    merged = {}
+    # 缓存逻辑: 根据 batch_dirs 内容生成 hash 作为缓存 key
+    cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache")
+    cache_key = hashlib.md5("|".join(sorted(batch_dirs)).encode()).hexdigest()
+    cache_path = os.path.join(cache_dir, f"date_split_{cache_key}.pkl")
+
+    if use_cache and os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as f:
+                merged = pickle.load(f)
+            print(f"[index_loader] 从缓存加载 date_split: {len(merged)} 条记录")
+            return merged
+        except Exception as e:
+            print(f"[index_loader] 缓存加载失败，重新解析: {e}")
+
+    # 收集待加载的 date_split.json 路径
+    ds_paths = []
     for batch_dir in batch_dirs:
         ds_path = os.path.join(batch_dir, "date_split.json")
-        if not os.path.exists(ds_path):
-            print(f"[index_loader] 警告: date_split.json 不存在: {ds_path}")
+        ds_paths.append(ds_path)
+
+    # 并行或串行加载
+    results = []
+    if max_workers > 1 and len(ds_paths) > 1:
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_load_single_date_split, p): p for p in ds_paths}
+            for fut in as_completed(futures):
+                results.append(fut.result())
+    else:
+        for p in ds_paths:
+            results.append(_load_single_date_split(p))
+
+    # 合并 (主进程)
+    merged = {}
+    skipped = 0
+    for ds_path, ds in results:
+        if not ds:
+            skipped += 1
             continue
-        ds = load_json(ds_path)
         merged.update(ds)
-    print(f"[index_loader] 合并 date_split: {len(merged)} 条记录 (来自 {len(batch_dirs)} 个 batch)")
+
+    total = len(results)
+    if skipped:
+        print(f"[index_loader] 警告: {skipped}/{total} 个 date_split.json 加载失败")
+    print(f"[index_loader] 合并 date_split: {len(merged)} 条记录 (来自 {total - skipped}/{total} 个 batch)")
+
+    # 写入缓存
+    if use_cache:
+        os.makedirs(cache_dir, exist_ok=True)
+        try:
+            with open(cache_path, 'wb') as f:
+                pickle.dump(merged, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"[index_loader] date_split 缓存已保存: {cache_path}")
+        except Exception as e:
+            print(f"[index_loader] 缓存保存失败: {e}")
+
     return merged
 
 
@@ -96,8 +167,39 @@ def load_frame_scene(path: str) -> Dict[str, List[str]]:
     返回: {pb_filename: [labels]}
     """
     data = load_json(path)
-    print(f"[index_loader] 加载 frame_scene: {len(data)} 帧")
     return data
+
+
+def check_label_prescreen(
+    dir_path: str,
+    target_labels: set,
+) -> bool:
+    """通过 label_count.json 快速预筛目录是否包含目标标签
+
+    若 label_count.json 不存在则返回 True (保守策略，不跳过)
+
+    Args:
+        dir_path: dir_key 目录路径
+        target_labels: 目标标签集合 (如 {"brake2stop", "at_intersection", ...})
+
+    Returns:
+        True: 可能包含目标标签，需要加载 frame_scene.json
+        False: 确定不含目标标签，可跳过
+    """
+    lc_path = os.path.join(dir_path, "label_count.json")
+    if not os.path.exists(lc_path):
+        return True  # 无预筛文件，保守加载
+
+    try:
+        with open(lc_path, 'r', encoding='utf-8') as f:
+            label_count = json.load(f)
+        # label_count 格式: {"label_name": count, ...}
+        for label in target_labels:
+            if label_count.get(label, 0) > 0:
+                return True
+        return False
+    except Exception:
+        return True  # 解析失败，保守加载
 
 
 def parse_directory_key(dir_key: str) -> Tuple[str, str]:

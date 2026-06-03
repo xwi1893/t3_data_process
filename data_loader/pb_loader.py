@@ -11,6 +11,7 @@ Protobuf 帧数据加载器，移植自参考项目 pd_loader.py
 import os
 import sys
 from typing import Dict, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 确保 proto 目录在路径中
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -242,29 +243,55 @@ def normalize_frame(pb_frame: dict) -> dict:
     }
 
 
-def load_frames_by_files(pb_dir: str, pb_filenames: List[str]) -> Dict[str, dict]:
+def load_frames_by_files(
+    pb_dir: str,
+    pb_filenames: List[str],
+    max_workers: int = 0,
+) -> Dict[str, dict]:
     """按文件名列表加载并归一化帧数据
+
+    支持线程池并行加载: max_workers > 1 时使用 ThreadPoolExecutor
 
     Args:
         pb_dir: .pb 文件所在目录
         pb_filenames: pb 文件名列表 (如 ['1771887926405091968.pb', ...])
+        max_workers: 并行加载线程数 (0=串行)
 
     Returns:
         {pb_filename: normalized_frame_dict}
     """
     result = {}
-    for fname in pb_filenames:
-        pb_path = os.path.join(pb_dir, fname)
-        if not os.path.exists(pb_path):
-            print(f"[pb_loader] 文件不存在，跳过: {pb_path}")
-            continue
-        try:
-            raw = load_pb_frame(pb_path)
-            result[fname] = normalize_frame(raw)
-        except Exception as e:
-            print(f"[pb_loader] 加载失败 {fname}: {e}")
-            continue
 
-    print(f"[pb_loader] 加载完成: 请求 {len(pb_filenames)} 帧, "
-          f"成功 {len(result)} 帧")
+    if max_workers <= 1:
+        # 串行加载
+        for fname in pb_filenames:
+            pb_path = os.path.join(pb_dir, fname)
+            if not os.path.exists(pb_path):
+                continue
+            try:
+                raw = load_pb_frame(pb_path)
+                result[fname] = normalize_frame(raw)
+            except Exception as e:
+                print(f"[pb_loader] 加载失败 {fname}: {e}")
+                continue
+    else:
+        # 并行加载
+        def _load_one(fname):
+            pb_path = os.path.join(pb_dir, fname)
+            if not os.path.exists(pb_path):
+                return fname, None
+            try:
+                raw = load_pb_frame(pb_path)
+                return fname, normalize_frame(raw)
+            except Exception as e:
+                print(f"[pb_loader] 加载失败 {fname}: {e}")
+                return fname, None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_load_one, f): f for f in pb_filenames}
+            for future in as_completed(futures):
+                fname, frame = future.result()
+                if frame is not None:
+                    result[fname] = frame
+
     return result
