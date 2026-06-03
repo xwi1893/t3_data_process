@@ -14,12 +14,357 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import DETECTION_PARAMS, FEATURE_PARAMS
+from config import DETECTION_PARAMS, FEATURE_PARAMS, WINDOW_EXTENSION
 from utils.frame_utils import (
     get_lead_vehicle, calculate_lateral_position,
     check_has_stopline, check_has_traffic_light,
     get_lane_boundaries, smooth_lead_distance,
 )
+
+
+# ============================================================
+# 时域窗口扩展辅助函数
+# ============================================================
+
+def _get_history_win(frame: dict) -> int:
+    """从帧数据中获取历史窗口帧数"""
+    config = frame.get('_raw', {}).get('config', {})
+    return config.get('history_win', 30)
+
+
+def _get_future_win(frame: dict) -> int:
+    """从帧数据中获取未来窗口帧数"""
+    config = frame.get('_raw', {}).get('config', {})
+    return config.get('future_win', 30)
+
+
+def _find_lead_agent(agents: list, lead_agent: Optional[dict]) -> Optional[dict]:
+    """通过 id 匹配找到前车 agent 的完整数据（含轨迹）
+
+    第 1 层 mask 过滤: 匹配后检查 agent_mask，整体无效则返回 None
+    """
+    if lead_agent is None:
+        return None
+    lead_id = lead_agent.get('id', -1)
+    if lead_id < 0:
+        return None
+    for a in agents:
+        if a.get('id', -1) == lead_id:
+            if not a.get('agent_mask', False):
+                return None  # agent 整体无效
+            return a
+    return None
+
+
+def _extract_lead_from_trajectory(
+    ego_traj_pos: list,
+    agent: Optional[dict],
+    indices: list,
+    valid_masks: list,
+) -> Tuple[list, list]:
+    """从轨迹数据中提取前车距离和速度
+
+    Args:
+        ego_traj_pos: 自车轨迹位置 [[x,y], ...] (与 agent 同一坐标系)
+        agent: 前车 agent (含 pos/velocity/valid_mask)
+        indices: 要提取的时间步索引列表
+        valid_masks: 每个时间步的有效性掩码
+
+    Returns:
+        (lead_dists, lead_speeds) 列表
+    """
+    lead_dists = []
+    lead_speeds = []
+
+    agent_pos = agent.get('pos', []) if agent else []
+    agent_vel = agent.get('velocity', []) if agent else []
+    agent_masks = agent.get('valid_mask', []) if agent else []
+
+    for i, idx in enumerate(indices):
+        # 自车 mask 检查
+        if i < len(valid_masks) and not valid_masks[i]:
+            continue  # 自车无效，跳过整个时间步
+
+        # agent mask 检查
+        if idx < len(agent_masks) and not agent_masks[idx]:
+            lead_dists.append(0.0)
+            lead_speeds.append(0.0)
+            continue
+
+        if idx < len(agent_pos) and idx < len(ego_traj_pos):
+            ax, ay = agent_pos[idx]
+            ex, ey = ego_traj_pos[idx]
+            dist = np.sqrt((ax - ex) ** 2 + (ay - ey) ** 2)
+            # 只取前方车辆 (ax > 0 即在自车前方)
+            if ax - ex > 0 and dist < 200:
+                lead_dists.append(dist)
+                if idx < len(agent_vel):
+                    vx, vy = agent_vel[idx]
+                    lead_speeds.append(np.sqrt(vx ** 2 + vy ** 2))
+                else:
+                    lead_speeds.append(0.0)
+            else:
+                lead_dists.append(0.0)
+                lead_speeds.append(0.0)
+        else:
+            lead_dists.append(0.0)
+            lead_speeds.append(0.0)
+
+    return lead_dists, lead_speeds
+
+
+def _extract_history_features(frame: dict, fps: int = 10) -> dict:
+    """从第一帧的历史数据中提取特征
+
+    Args:
+        frame: 归一化帧数据（第一帧）
+        fps: 帧率
+
+    Returns:
+        特征 dict (与 extract_segment_features 格式一致)
+    """
+    hist_traj = frame.get('label_ego_hist_traj', {})
+    masks = hist_traj.get('mask', [])
+    positions = hist_traj.get('pos', [])
+    velocities = hist_traj.get('v', [])
+    yaws = hist_traj.get('yaw', [])
+    yaw_rates = hist_traj.get('yaw_rate', [])
+
+    if not positions or not masks:
+        return {}
+
+    history_win = _get_history_win(frame)
+    n_steps = min(len(positions), len(masks), history_win)
+    if n_steps == 0:
+        return {}
+
+    # 检测当前帧前车
+    agents = frame.get('data_agent', [])
+    lanelines = frame.get('data_laneline', [])
+    ego_yaw = frame.get('data_ego_curr_status', {}).get('yaw', 0.0)
+    lead_agent, _, _ = get_lead_vehicle(agents, lanelines, ego_yaw)
+    lead_agent_full = _find_lead_agent(agents, lead_agent)
+
+    # 提取前车历史轨迹
+    # agent pos 中历史部分: pos[:history_win]
+    hist_indices = list(range(history_win))
+    ego_hist_pos = [[0.0, 0.0]] * history_win  # 自车历史在自身坐标系下为原点
+    if len(positions) >= history_win:
+        ego_hist_pos = positions[:history_win]
+
+    lead_dists, lead_speeds = _extract_lead_from_trajectory(
+        ego_hist_pos, lead_agent_full, hist_indices,
+        masks[:history_win]
+    )
+
+    # 构建特征序列 (只保留 mask=True 的有效步)
+    time_list = []
+    speed_list = []
+    yaw_list = []
+    yaw_rate_list = []
+    lead_dist_list = []
+    lead_speed_list = []
+
+    valid_count = 0
+    for i in range(n_steps):
+        if i < len(masks) and not masks[i]:
+            continue
+        if i < len(lead_dists):
+            valid_count += 1
+            # 时间: 负数，表示当前帧之前
+            t = -(n_steps - i) / fps
+            time_list.append(t)
+
+            # 自车速度
+            if i < len(velocities):
+                vx, vy = velocities[i]
+                speed_list.append(np.sqrt(vx ** 2 + vy ** 2))
+            else:
+                speed_list.append(0.0)
+
+            yaw_list.append(yaws[i] if i < len(yaws) else 0.0)
+            yaw_rate_list.append(yaw_rates[i] if i < len(yaw_rates) else 0.0)
+            lead_dist_list.append(lead_dists[i])
+            lead_speed_list.append(lead_speeds[i])
+
+    return {
+        'time': time_list,
+        'speed': speed_list,
+        'yaw': yaw_list,
+        'yaw_rate': yaw_rate_list,
+        'lead_dist': lead_dist_list,
+        'lead_speed': lead_speed_list,
+    }
+
+
+def _extract_future_features(frame: dict, fps: int = 10) -> dict:
+    """从最后一帧的未来数据中提取特征
+
+    Args:
+        frame: 归一化帧数据（最后一帧）
+        fps: 帧率
+
+    Returns:
+        特征 dict (与 extract_segment_features 格式一致)
+    """
+    future_traj = frame.get('label_ego_traj', {})
+    masks = future_traj.get('mask', [])
+    positions = future_traj.get('pos', [])
+    velocities = future_traj.get('v', [])
+    yaws = future_traj.get('yaw', [])
+    yaw_rates = future_traj.get('yaw_rate', [])
+
+    if not positions or not masks:
+        return {}
+
+    future_win = _get_future_win(frame)
+    n_steps = min(len(positions), len(masks), future_win)
+    if n_steps == 0:
+        return {}
+
+    # 检测当前帧前车
+    agents = frame.get('data_agent', [])
+    lanelines = frame.get('data_laneline', [])
+    ego_yaw = frame.get('data_ego_curr_status', {}).get('yaw', 0.0)
+    lead_agent, _, _ = get_lead_vehicle(agents, lanelines, ego_yaw)
+    lead_agent_full = _find_lead_agent(agents, lead_agent)
+
+    # 提取前车未来轨迹
+    # agent pos 中未来部分: pos[history_win+1:]
+    history_win = _get_history_win(frame)
+    future_start = history_win + 1
+    future_indices = list(range(future_start, future_start + future_win))
+    ego_future_pos = positions[:n_steps]
+
+    lead_dists, lead_speeds = _extract_lead_from_trajectory(
+        ego_future_pos, lead_agent_full, future_indices,
+        masks[:n_steps]
+    )
+
+    # 构建特征序列
+    time_list = []
+    speed_list = []
+    yaw_list = []
+    yaw_rate_list = []
+    lead_dist_list = []
+    lead_speed_list = []
+
+    for i in range(n_steps):
+        if i < len(masks) and not masks[i]:
+            continue
+        if i < len(lead_dists):
+            # 时间: 正数，表示当前帧之后
+            t = (i + 1) / fps
+            time_list.append(t)
+
+            if i < len(velocities):
+                vx, vy = velocities[i]
+                speed_list.append(np.sqrt(vx ** 2 + vy ** 2))
+            else:
+                speed_list.append(0.0)
+
+            yaw_list.append(yaws[i] if i < len(yaws) else 0.0)
+            yaw_rate_list.append(yaw_rates[i] if i < len(yaw_rates) else 0.0)
+            lead_dist_list.append(lead_dists[i])
+            lead_speed_list.append(lead_speeds[i])
+
+    return {
+        'time': time_list,
+        'speed': speed_list,
+        'yaw': yaw_list,
+        'yaw_rate': yaw_rate_list,
+        'lead_dist': lead_dist_list,
+        'lead_speed': lead_speed_list,
+    }
+
+
+def _concat_features(
+    history_feats: dict,
+    current_feats: dict,
+    future_feats: dict,
+    fps: int = 10,
+) -> dict:
+    """拼接历史 + 当前 + 未来特征序列
+
+    Args:
+        history_feats: 历史帧特征 (可能为空 dict)
+        current_feats: 当前片段帧特征
+        future_feats: 未来帧特征 (可能为空 dict)
+        fps: 帧率
+
+    Returns:
+        拼接后的完整特征 dict
+    """
+    # 需要拼接的 list 类型字段
+    list_fields = [
+        'speed', 'yaw', 'yaw_rate', 'lead_dist', 'lead_speed',
+        'lateral_pos', 'lane_width', 'curvature',
+        'is_at_intersection', 'has_stopline', 'has_traffic_light',
+        'is_turning', 'is_u_turn',
+    ]
+
+    # 从当前特征获取默认值 (用于历史/未来中缺失的字段)
+    defaults = {
+        'lateral_pos': 0.0, 'lane_width': 3.5, 'curvature': 0.0,
+        'is_at_intersection': False, 'has_stopline': False,
+        'has_traffic_light': False, 'is_turning': False, 'is_u_turn': False,
+    }
+
+    result = {}
+
+    for field in list_fields:
+        hist_vals = history_feats.get(field, [])
+        curr_vals = current_feats.get(field, [])
+        fut_vals = future_feats.get(field, [])
+
+        # 历史/未来可能缺少某些字段，用默认值补齐
+        if not hist_vals and history_feats:
+            default = defaults.get(field, 0.0)
+            hist_vals = [default] * len(history_feats.get('speed', []))
+        if not fut_vals and future_feats:
+            default = defaults.get(field, 0.0)
+            fut_vals = [default] * len(future_feats.get('speed', []))
+
+        result[field] = hist_vals + curr_vals + fut_vals
+
+    # 重新计算 time 数组使其连续
+    total_len = len(result['speed'])
+    n_hist = len(history_feats.get('speed', []))
+    n_curr = len(current_feats.get('speed', []))
+
+    time_list = []
+    for i in range(total_len):
+        time_list.append((i - n_hist) / fps)
+    result['time'] = time_list
+
+    # 重新计算 acceleration (拼接后整体差分)
+    speed_arr = np.array(result['speed'])
+    accel = np.zeros(len(speed_arr))
+    if len(speed_arr) > 1:
+        accel[1:] = np.diff(speed_arr) * fps
+    if len(accel) >= 3:
+        kernel = np.ones(3) / 3
+        accel = np.convolve(accel, kernel, mode='same')
+    result['acceleration'] = accel.tolist()
+
+    # 重新平滑 lead_dist (拼接后整体平滑)
+    lead_dist_arr = np.array(result['lead_dist'])
+    lead_dist_smooth = smooth_lead_distance(
+        lead_dist_arr, FEATURE_PARAMS.get("smooth_lead_dist_window", 5)
+    )
+    result['lead_dist'] = lead_dist_smooth.tolist()
+
+    # 重新计算时距
+    time_headway = np.full(len(speed_arr), 15.0)
+    valid_speed = speed_arr > 0.1
+    time_headway[valid_speed] = np.minimum(
+        lead_dist_smooth[valid_speed] / speed_arr[valid_speed], 15.0
+    )
+    result['time_headway'] = time_headway.tolist()
+
+    result['frame_count'] = current_feats.get('frame_count', 0) + n_hist + len(future_feats.get('speed', []))
+
+    return result
 
 
 # ============================================================
@@ -142,15 +487,14 @@ def extract_segment_features(
         lead_dist_smooth[valid_speed] / speed_arr[valid_speed], 15.0
     )
 
-    return {
-        'time': time_list,
+    # === 时域窗口扩展 ===
+    # 当前片段特征已提取完毕，存入 current_feats
+    current_feats = {
         'speed': speed_list,
-        'acceleration': accel.tolist(),
         'lead_dist': lead_dist_smooth.tolist(),
         'lead_speed': lead_speed_list,
         'lateral_pos': lateral_pos_list,
         'lane_width': lane_width_list,
-        'time_headway': time_headway.tolist(),
         'curvature': curvature_list,
         'yaw': yaw_list,
         'yaw_rate': yaw_rate_list,
@@ -161,6 +505,33 @@ def extract_segment_features(
         'is_u_turn': is_u_turn_list,
         'frame_count': len(valid_frames),
     }
+
+    ext_cfg = WINDOW_EXTENSION
+    history_feats = {}
+    future_feats = {}
+
+    # 历史数据前补 (从第一帧)
+    if ext_cfg.get("use_history", False) and valid_frames:
+        first_frame = valid_frames[0][1]
+        history_feats = _extract_history_features(first_frame, fps)
+        max_hist = ext_cfg.get("max_history_frames", 30)
+        if history_feats and len(history_feats.get('speed', [])) > max_hist:
+            for k, v in history_feats.items():
+                if isinstance(v, list):
+                    history_feats[k] = v[-max_hist:]
+
+    # 未来数据后补 (从最后一帧)
+    if ext_cfg.get("use_future", False) and valid_frames:
+        last_frame = valid_frames[-1][1]
+        future_feats = _extract_future_features(last_frame, fps)
+        max_fut = ext_cfg.get("max_future_frames", 30)
+        if future_feats and len(future_feats.get('speed', [])) > max_fut:
+            for k, v in future_feats.items():
+                if isinstance(v, list):
+                    future_feats[k] = v[:max_fut]
+
+    # 拼接: history + current + future
+    return _concat_features(history_feats, current_feats, future_feats, fps)
 
 
 # ============================================================

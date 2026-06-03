@@ -105,6 +105,15 @@ FEATURE_PARAMS = {
     "num_phases": 5,
 }
 
+# === 时域窗口扩展配置 ===
+# 利用第一帧的历史数据和最后一帧的未来数据扩展特征时间窗口
+WINDOW_EXTENSION = {
+    "use_history": True,       # 使用第一帧的历史数据前补
+    "use_future": True,        # 使用最后一帧的未来数据后补
+    "max_history_frames": 30,  # 最多前补帧数
+    "max_future_frames": 30,   # 最多后补帧数
+}
+
 # === 数据路径配置 ===
 # 用户需根据实际环境填写
 DATA_PATHS = {

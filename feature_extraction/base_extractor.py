@@ -10,7 +10,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import FEATURE_PARAMS
+from config import FEATURE_PARAMS, WINDOW_EXTENSION
 from utils.frame_utils import (
     get_lead_vehicle, calculate_lateral_position,
     smooth_lead_distance, get_lane_boundaries,
@@ -24,6 +24,7 @@ def extract_direct_features(
     """从片段帧数据提取直接特征
 
     移植自参考项目 main_extra.py extract_direct_features()
+    支持时域窗口扩展: 第一帧历史数据 + 最后一帧未来数据
 
     Args:
         frame_data: {pb_filename: normalized_frame}
@@ -63,6 +64,46 @@ def extract_direct_features(
         lat_pos, _ = calculate_lateral_position(lanelines)
         lateral_pos_list.append(lat_pos)
         lanelines_list.append(lanelines)
+
+    # === 时域窗口扩展 ===
+    ext_cfg = WINDOW_EXTENSION
+
+    # 历史数据前补 (从第一帧)
+    if ext_cfg.get("use_history", False) and valid_files:
+        from detection.scene_detectors import _extract_history_features
+        first_frame = frame_data[valid_files[0]]
+        hist = _extract_history_features(first_frame, fps=10)
+        if hist and hist.get('speed'):
+            max_hist = ext_cfg.get("max_history_frames", 30)
+            hist_speed = hist['speed'][-max_hist:]
+            n = len(hist_speed)
+            speed_list = hist_speed + speed_list
+            yaw_rate_list = hist.get('yaw_rate', [0.0]*n)[-max_hist:] + yaw_rate_list
+            lead_dist_list = hist.get('lead_dist', [0.0]*n)[-max_hist:] + lead_dist_list
+            lead_speed_list = hist.get('lead_speed', [0.0]*n)[-max_hist:] + lead_speed_list
+            # 历史帧无车道线数据，用第一帧的横向位置和车道线填充
+            first_lat = lateral_pos_list[0] if lateral_pos_list else 0.0
+            first_ll = lanelines_list[0] if lanelines_list else []
+            lateral_pos_list = [first_lat] * n + lateral_pos_list
+            lanelines_list = [first_ll] * n + lanelines_list
+
+    # 未来数据后补 (从最后一帧)
+    if ext_cfg.get("use_future", False) and valid_files:
+        from detection.scene_detectors import _extract_future_features
+        last_frame = frame_data[valid_files[-1]]
+        fut = _extract_future_features(last_frame, fps=10)
+        if fut and fut.get('speed'):
+            max_fut = ext_cfg.get("max_future_frames", 30)
+            fut_speed = fut['speed'][:max_fut]
+            n = len(fut_speed)
+            speed_list = speed_list + fut_speed
+            yaw_rate_list = yaw_rate_list + fut.get('yaw_rate', [0.0]*n)[:max_fut]
+            lead_dist_list = lead_dist_list + fut.get('lead_dist', [0.0]*n)[:max_fut]
+            lead_speed_list = lead_speed_list + fut.get('lead_speed', [0.0]*n)[:max_fut]
+            last_lat = lateral_pos_list[-1] if lateral_pos_list else 0.0
+            last_ll = lanelines_list[-1] if lanelines_list else []
+            lateral_pos_list = lateral_pos_list + [last_lat] * n
+            lanelines_list = lanelines_list + [last_ll] * n
 
     # 转 numpy + 平滑
     speed = np.array(speed_list)
