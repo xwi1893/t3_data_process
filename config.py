@@ -105,6 +105,15 @@ FEATURE_PARAMS = {
     "num_phases": 5,
 }
 
+# === 性能配置 ===
+PERFORMANCE_CFG = {
+    "batch_workers": 4,               # batch 级多进程 worker 数 (0=单进程)
+    "pb_load_workers": 4,             # pb 文件并行加载线程数 (0=串行)
+    "use_date_split_cache": True,     # 启用 date_split pickle 缓存
+    "use_label_prescreen": True,      # 启用 label_count.json 预筛
+    "progress_bar": True,             # 启用 tqdm 进度条
+}
+
 # === 数据路径配置 ===
 # 用户需根据实际环境填写
 DATA_PATHS = {
