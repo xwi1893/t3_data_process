@@ -1,6 +1,9 @@
 """
 segment_merger.py
-合并连续帧为场景片段
+识别连续场景片段 + 均匀采样 k 帧
+
+旧版: 合并连续帧为多帧片段 (merge_into_segments)
+新版: 识别连续场景 → 均匀采样 k 帧 (group_and_sample)
 """
 
 from typing import Dict, List, Optional
@@ -8,18 +11,18 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import MERGE_PARAMS
+from config import MERGE_PARAMS, SAMPLE_PARAMS
 
 
-def merge_into_segments(
+def identify_continuous_runs(
     frames: List[dict],
     max_gap_seconds: float = MERGE_PARAMS["max_gap_seconds"],
     min_segment_duration: float = MERGE_PARAMS["min_segment_duration"],
-) -> List[dict]:
-    """合并连续帧为候选场景片段
+) -> List[List[dict]]:
+    """识别连续场景片段（不合并，只分段）
 
     连续性判断: 相邻帧时间戳差 <= max_gap_seconds (转换为纳秒)
-    过滤: 时长 < min_segment_duration 的片段
+    过滤: 时长 < min_segment_duration 的片段直接丢弃
 
     Args:
         frames: 同一 (driver_id, scene_type) 的帧列表，已按时间排序
@@ -27,7 +30,7 @@ def merge_into_segments(
         min_segment_duration: 最短片段时长(秒)
 
     Returns:
-        场景片段列表
+        连续帧列表的列表 [[f0, f1, ...], [f5, f6, ...], ...]
     """
     if not frames:
         return []
@@ -35,7 +38,7 @@ def merge_into_segments(
     max_gap_ns = int(max_gap_seconds * 1e9)
     min_duration_ns = int(min_segment_duration * 1e9)
 
-    segments = []
+    runs = []
     current_run = [frames[0]]
 
     for i in range(1, len(frames)):
@@ -45,66 +48,87 @@ def merge_into_segments(
         if curr_ts - prev_ts <= max_gap_ns:
             current_run.append(frames[i])
         else:
-            # 间隔过大，结束当前片段
-            segments.append(current_run)
+            runs.append(current_run)
             current_run = [frames[i]]
 
-    # 最后一个片段
     if current_run:
-        segments.append(current_run)
+        runs.append(current_run)
 
-    # 构建片段结构并过滤过短片段
+    # 过滤过短的片段
     result = []
-    for run in segments:
-        start_ts = run[0]['timestamp_ns']
-        end_ts = run[-1]['timestamp_ns']
-        duration_ns = end_ts - start_ts
-
-        if duration_ns < min_duration_ns:
-            continue
-
-        first = run[0]
-        segment = {
-            'driver_id': first['driver_id'],
-            'scene_type': first['scene_type'],
-            'scene_name': first['scene_name_cn'],
-            'scene_name_en': first['scene_name_en'],
-            'dir_key': first['dir_key'],
-            'cloud_path': first['cloud_path'],
-            'pb_files': [f['pb_file'] for f in run],
-            'start_timestamp_ns': start_ts,
-            'end_timestamp_ns': end_ts,
-            'duration_sec': duration_ns / 1e9,
-            'frame_count': len(run),
-            'confirmed': False,
-            'confirm_reason': '',
-        }
-        result.append(segment)
-
-    print(f"[merger] {len(segments)} 个原始片段 -> "
-          f"{len(result)} 个有效片段 (过滤 <{min_segment_duration}s)")
+    for run in runs:
+        duration_ns = run[-1]['timestamp_ns'] - run[0]['timestamp_ns']
+        if duration_ns >= min_duration_ns:
+            result.append(run)
 
     return result
 
 
-def group_and_merge(
+def sample_k_frames(
+    run: List[dict],
+    k: int = SAMPLE_PARAMS["k_frames"],
+) -> List[dict]:
+    """从连续片段中均匀采样 k 帧
+
+    采样策略: 等间隔，覆盖首、中、尾
+
+    Args:
+        run: 连续帧列表，已按时间排序
+        k: 采样帧数
+
+    Returns:
+        采样条目列表，每个条目 = 单个帧的信息 + sample_id
+    """
+    n = len(run)
+    if n <= k:
+        indices = list(range(n))
+    else:
+        # 等间隔采样: 首尾 + 中间均匀分布
+        indices = [round(i * (n - 1) / (k - 1)) for i in range(k)]
+        # 去重（极端情况下 round 可能产生重复）
+        indices = sorted(set(indices))
+
+    samples = []
+    for idx in indices:
+        frame = run[idx]
+        sample = {
+            'driver_id': frame['driver_id'],
+            'scene_type': frame['scene_type'],
+            'scene_name': frame['scene_name_cn'],
+            'scene_name_en': frame['scene_name_en'],
+            'dir_key': frame['dir_key'],
+            'cloud_path': frame['cloud_path'],
+            'pb_file': frame['pb_file'],
+            'timestamp_ns': frame['timestamp_ns'],
+            'labels': frame.get('labels', []),
+            'confirmed': False,
+            'confirm_reason': '',
+        }
+        samples.append(sample)
+
+    return samples
+
+
+def group_and_sample(
     frame_scene: dict,
     dir_key: str,
     driver_reverse_index: dict,
     date_split: dict,
+    k_frames: int = SAMPLE_PARAMS["k_frames"],
 ) -> List[dict]:
-    """完整的分组+合并流程
+    """完整的分组 + 连续片段识别 + k 帧采样
 
-    对单个目录执行: 分组 -> 合并 -> 返回所有候选片段
+    对单个目录执行: 分组 → 识别连续片段 → 均匀采样 k 帧
 
     Args:
         frame_scene: {pb_filename: [labels]}
         dir_key: 目录key
         driver_reverse_index: 反向索引
         date_split: 目录key到云端路径
+        k_frames: 每个连续片段采样的帧数
 
     Returns:
-        所有候选场景片段列表
+        所有采样条目列表
     """
     from grouper.frame_grouper import group_frames
 
@@ -112,24 +136,27 @@ def group_and_merge(
     if not groups:
         return []
 
-    all_segments = []
+    all_samples = []
     for (driver_id, scene_type), frames in groups.items():
-        segments = merge_into_segments(frames)
+        runs = identify_continuous_runs(frames)
 
-        # 分配 segment_id
-        for idx, seg in enumerate(segments):
-            seg['segment_id'] = idx
+        for run in runs:
+            samples = sample_k_frames(run, k=k_frames)
+            all_samples.extend(samples)
 
-        all_segments.extend(segments)
+    # 分配 sample_id
+    for idx, sample in enumerate(all_samples):
+        sample['sample_id'] = idx
 
     scene_names = {1: "路口停车", 2: "起步", 3: "跟车", 4: "跟停", 5: "变道"}
     type_counts = {}
-    for seg in all_segments:
-        st = seg['scene_type']
+    for s in all_samples:
+        st = s['scene_type']
         type_counts[st] = type_counts.get(st, 0) + 1
 
-    print(f"[merger] {dir_key}: 共 {len(all_segments)} 个候选片段")
+    print(f"[sampler] {dir_key}: 共 {len(all_samples)} 个采样条目 (k={k_frames})")
     for st, count in sorted(type_counts.items()):
         print(f"  Scene {st} ({scene_names.get(st, '?')}): {count} 个")
 
-    return all_segments
+    return all_samples
+

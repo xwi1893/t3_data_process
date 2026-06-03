@@ -340,7 +340,7 @@ def extract_scene5_features(features: dict) -> dict:
 
     lateral_shift = float(np.mean(after_lat) - np.mean(before_lat)) if (
         len(before_lat) > 0 and len(after_lat) > 0
-    ) else 0
+    ) else 0                        # 出错
 
     result = {
         "reference_frame_idx": ref_frame_idx,

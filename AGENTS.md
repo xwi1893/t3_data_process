@@ -127,6 +127,99 @@ pb_dir = cloud_path  (gt_label 前缀已替换为 t3_root_dir)
 
 ---
 
+## 新版工作流程
+
+> **核心变化**: 旧流程将连续帧合并为多帧片段再整体检测；新流程在连续场景中采样 k 帧 pb 文件，每帧独立做场景检测（单 pb 含 ~250 帧数据，足够检测）。
+
+### 设计思路
+
+- 每个 pb 文件包含 ~250 帧时序数据（含历史轨迹、当前帧、未来轨迹），单个 pb 已有足够的时序上下文做场景检测
+- 旧流程合并多个 pb 再做检测，存在大量冗余加载（加载了不需要的 pb 文件）
+- 新流程从每个连续场景中均匀采样 k 帧（初始 k=3），每帧独立通过检测即可入数据集
+
+### Stage 1-3: 不变
+
+- Stage 1: 加载 driver_split.json，构建 (date, vehicle_id) → driver_id 反向索引
+- Stage 2: 从 data_batch.json 发现所有 batch 目录
+- Stage 3: 加载合并各 batch 的 date_split.json → `{dir_key: cloud_path}`
+
+### Stage 4: 标签筛选 + 连续场景分段 + k 帧采样
+
+```
+对每个 batch:
+  遍历 {batch}/date/ 下的每个子目录:
+    1. 验证 driver_id（无匹配则跳过）
+    2. 加载 frame_scene.json → {pb_filename: [labels]}
+    3. 标签分类: 每个 pb_file → (scene_type, name_cn, name_en)
+    4. 按 (driver_id, scene_type) 分组，组内按时间戳排序
+    5. 识别连续场景片段（相邻帧间隔 ≤ max_gap_seconds）
+    6. 对每个连续片段:
+       - 从片段的 pb_files 中均匀采样 k 帧（初始 k=3）
+       - 若片段帧数 < k，则取全部帧
+       - 生成 k 个「采样条目」，每个条目含 1 个 pb_file
+```
+
+**采样策略**: 对连续片段 `[f0, f1, ..., fn]`，均匀取 k 个索引点（等间隔），尽量覆盖片段的首、中、尾。
+
+**输出数据结构变化**:
+```
+旧: segment = {pb_files: [f0, f1, ..., fn], scene_type, ...}   ← 多帧片段
+新: sample   = {pb_file: fi, scene_type, ...}                  ← 单帧采样
+```
+
+### Stage 5: 单帧场景检测
+
+```
+对每个采样条目:
+  1. 加载该单个 pb 文件（内含 ~250 帧数据）
+  2. 从 pb 内部数据构建特征序列（历史轨迹 + 当前帧 + 未来轨迹）
+  3. 运行对应场景类型的检测算法
+  4. 通过检测 → 标记 confirmed=True，进入数据集
+     未通过 → 标记 confirmed=False，丢弃
+```
+
+**关键**: 检测函数 `extract_segment_features` 和 `confirm_*` 需要适配单 pb 输入:
+- 旧输入: `frame_data = {pb_file_1: frame, pb_file_2: frame, ...}` 多帧字典
+- 新输入: `frame_data = {pb_file_i: frame}` 单帧字典，时序信息从该帧的 `_raw` 字段中获取（ego_history_time、future_traj 等）
+
+### Stage 6: 特征提取 + 输出
+
+与旧流程基本一致，但特征提取范围从多帧片段变为单帧:
+- 直接特征: 从单帧 pb 的内部时序数据提取（不再跨 pb 帧计算）
+- 场景特征: 同上
+- 输出: training_manifest.json + features
+
+### 涉及改动的文件
+
+| 文件 | 改动 | 说明 |
+|------|------|------|
+| `grouper/segment_merger.py` | 新增 `sample_k_frames()` | 从连续片段中采样 k 帧，替代 `merge_into_segments` |
+| `grouper/frame_grouper.py` | 小改 | 分组逻辑不变，但输出结构从 segment 改为 sample |
+| `detection/detector.py` | 适配单帧输入 | `confirm_scene` 适配单 pb 的 frame_data |
+| `detection/scene_detectors.py` | 适配单帧输入 | `extract_segment_features` 从单帧内部数据构建特征序列 |
+| `feature_extraction/base_extractor.py` | 适配单帧输入 | `extract_direct_features` 改为从单帧内部提取 |
+| `feature_extraction/scene_extractors.py` | 适配单帧输入 | 场景特征提取适配 |
+| `config.py` | 新增参数 | 添加 `SAMPLE_PARAMS = {"k_frames": 3}` |
+| `main.py` | Stage 4/5 改造 | 采样 + 单帧检测循环 |
+
+### 设计决策（已确认）
+
+- **k 值**: 初始 k=3，所有场景类型统一
+- **采样策略**: 等间隔采样（首、中、尾）
+- **连续片段过滤**: 过短片段（< min_segment_duration）直接丢弃
+- **检测阈值**: 保持原有阈值不变，WINDOW_EXTENSION 提供 ~60 步特征序列已足够；后续如需调整则记录在此
+
+### 阈值调整记录
+
+| 修改位置 | 原值 | 新值 | 原因 |
+|----------|------|------|------|
+| `scene_detectors.extract_segment_features` | `len(valid_frames) < 3` | `len(valid_frames) < 1` | 支持单帧输入 |
+| `base_extractor.extract_direct_features` | `len(valid_files) < 3` | `len(valid_files) < 1` | 支持单帧输入 |
+
+> 检测函数中的 `len(speed) < 3` / `len(speed) < 5` 阈值未改动，因为 WINDOW_EXTENSION 提供 ~60 步特征序列，始终满足这些最低要求。
+
+---
+
 ## 提速方案
 
 目录众多 (每个 batch 约 790 个 date 目录，多个 batch)，以下是可行的优化方向:

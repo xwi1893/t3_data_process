@@ -49,6 +49,12 @@ COMPLIANCE_PARAMS = {
     "stopline_distance_threshold": 50.0,  # 米, 停止线检测距离
 }
 
+# === 采样参数 ===
+# 从每个连续场景片段中均匀采样 k 帧，每帧独立做场景检测
+SAMPLE_PARAMS = {
+    "k_frames": 3,                # 每个连续片段采样的帧数
+}
+
 # === 片段合并参数 ===
 MERGE_PARAMS = {
     "max_gap_seconds": 0.5,            # 允许的最大帧间隔(秒), 约5帧

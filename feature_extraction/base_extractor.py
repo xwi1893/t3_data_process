@@ -34,7 +34,7 @@ def extract_direct_features(
         直接特征字典，或 None
     """
     valid_files = [f for f in pb_files if f in frame_data]
-    if len(valid_files) < 3:
+    if len(valid_files) < 1:
         return None
 
     speed_list = []
@@ -129,8 +129,8 @@ def extract_direct_features(
         max_offsets = np.array(max_offsets)
         lateral_pos = np.clip(smoothed, -max_offsets, max_offsets)
 
-    # 时间
-    time_sec = np.arange(len(valid_files)) / 10.0  # 假设 10fps
+    # 时间 (在时域窗口扩展之后计算，以匹配扩展后的特征长度)
+    time_sec = np.arange(len(speed_list)) / 10.0  # 假设 10fps
 
     return {
         "valid_files": valid_files,

@@ -26,13 +26,13 @@ class NumpyEncoder(json.JSONEncoder):
 
 
 def write_features(
-    segments: List[dict],
+    samples: List[dict],
     output_dir: str,
 ) -> str:
-    """将所有片段特征写入 JSON 文件
+    """将所有采样条目特征写入 JSON 文件
 
     Args:
-        segments: 包含特征的片段列表
+        samples: 包含特征的采样条目列表
         output_dir: 输出目录
 
     Returns:
@@ -41,39 +41,42 @@ def write_features(
     os.makedirs(output_dir, exist_ok=True)
 
     all_features = []
-    for seg in segments:
-        if not seg.get('confirmed', False):
+    for s in samples:
+        if not s.get('confirmed', False):
             continue
 
-        scene_type = seg.get('scene_type', 0)
+        scene_type = s.get('scene_type', 0)
         scene_en = SCENE_TYPE_NAMES.get(scene_type, f"scene{scene_type}")
 
+        # pb_files: 兼容新版(单帧)和旧版(多帧)
+        pb_files = s.get('pb_files') or [s.get('pb_file', '')]
+
         feature_entry = {
-            "driver_id": seg.get('driver_id', ''),
+            "driver_id": s.get('driver_id', ''),
             "scene_type": scene_type,
             "scene_name": scene_en,
-            "segment_id": seg.get('segment_id', 0),
-            "directory_key": seg.get('dir_key', ''),
-            "pb_files": seg.get('pb_files', []),
-            "duration_sec": seg.get('duration_sec', 0),
-            "frame_count": seg.get('frame_count', 0),
+            "sample_id": s.get('sample_id', s.get('segment_id', 0)),
+            "directory_key": s.get('dir_key', ''),
+            "pb_file": s.get('pb_file', ''),
+            "pb_files": pb_files,
+            "timestamp_ns": s.get('timestamp_ns', 0),
         }
 
         # 通用特征
-        if 'general_features' in seg:
-            feature_entry["general"] = seg['general_features']
+        if 'general_features' in s:
+            feature_entry["general"] = s['general_features']
 
         # 场景专用特征
-        if 'scene_features' in seg:
-            feature_entry[scene_en] = seg['scene_features']
+        if 'scene_features' in s:
+            feature_entry[scene_en] = s['scene_features']
 
         # 检测指标
-        if 'detection' in seg:
-            feature_entry["detection_metrics"] = seg['detection'].get('metrics', {})
+        if 'detection' in s:
+            feature_entry["detection_metrics"] = s['detection'].get('metrics', {})
 
         # 合规指标
-        if 'compliance' in seg:
-            feature_entry["compliance_metrics"] = seg['compliance'].get('metrics', {})
+        if 'compliance' in s:
+            feature_entry["compliance_metrics"] = s['compliance'].get('metrics', {})
 
         all_features.append(feature_entry)
 
@@ -82,6 +85,6 @@ def write_features(
         json.dump(all_features, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
 
     print(f"[output] 特征文件已写入: {output_path}")
-    print(f"  共 {len(all_features)} 个已确认片段的特征")
+    print(f"  共 {len(all_features)} 个已确认采样条目的特征")
 
     return output_path

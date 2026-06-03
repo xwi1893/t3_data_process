@@ -25,7 +25,7 @@ from data_loader.index_loader import (
     load_frame_scene, lookup_driver_id,
 )
 from data_loader.pb_loader import load_frames_by_files
-from grouper.segment_merger import group_and_merge
+from grouper.segment_merger import group_and_sample
 from detection.detector import confirm_scene
 from compliance.checker import check_compliance
 from feature_extraction.base_extractor import extract_all_features
@@ -53,8 +53,8 @@ def run_pipeline(
     Stage 1: 驾驶员索引加载
     Stage 2: Batch 发现
     Stage 3: date_split 加载与合并
-    Stage 4: 标签筛选 + 分组合并
-    Stage 5: 帧数据加载 + 检测确认 + 合规检查
+    Stage 4: 标签筛选 + 连续场景分段 + k 帧采样
+    Stage 5: 单帧数据加载 + 检测确认 + 合规检查
     Stage 6: 特征提取 + 输出
     """
     print("=" * 60)
@@ -82,9 +82,9 @@ def run_pipeline(
         print("[警告] date_split 为空")
         return {"error": "无 date_split 数据"}
 
-    # ===== Stage 4: 标签筛选 + 分组合并 =====
-    print("\n[Stage 4] 标签筛选 + 分组合并")
-    all_segments = []
+    # ===== Stage 4: 标签筛选 + 连续场景分段 + k 帧采样 =====
+    print("\n[Stage 4] 标签筛选 + 连续场景分段 + k 帧采样")
+    all_samples = []
     total_dirs = 0
     skipped_no_driver = 0
     skipped_no_scene = 0
@@ -114,57 +114,59 @@ def run_pipeline(
                 continue
 
             frame_scene = load_frame_scene(fs_path)
-            segments = group_and_merge(
+            samples = group_and_sample(
                 frame_scene, dir_key, driver_reverse_index, date_split
             )
-            all_segments.extend(segments)
+            all_samples.extend(samples)
 
     print(f"\n  扫描目录: {total_dirs}")
     print(f"  跳过(无 driver_id): {skipped_no_driver}")
     print(f"  跳过(无 frame_scene): {skipped_no_scene}")
-    print(f"  总计 {len(all_segments)} 个候选片段")
+    print(f"  总计 {len(all_samples)} 个采样条目")
 
-    if not all_segments:
-        print("[结束] 无候选片段")
-        return {"total_segments": 0}
+    if not all_samples:
+        print("[结束] 无采样条目")
+        return {"total_samples": 0}
 
-    # ===== Stage 5: 帧数据加载 + 检测确认 + 合规检查 =====
-    print("\n[Stage 5] 帧数据加载 + 检测确认 + 合规检查")
+    # ===== Stage 5: 单帧数据加载 + 检测确认 + 合规检查 =====
+    print("\n[Stage 5] 单帧数据加载 + 检测确认 + 合规检查")
 
-    for seg in all_segments:
-        # 从 segment 的 cloud_path 推导 pb 目录
-        pb_dir = seg.get('cloud_path', '')
+    for sample in all_samples:
+        # 从 sample 的 cloud_path 推导 pb 目录
+        pb_dir = sample.get('cloud_path', '')
 
         if not pb_dir or not os.path.isdir(pb_dir):
             print(f"  [跳过] pb 目录不存在: {pb_dir}")
-            seg['confirmed'] = False
-            seg['confirm_reason'] = f"pb 目录不存在: {pb_dir}"
+            sample['confirmed'] = False
+            sample['confirm_reason'] = f"pb 目录不存在: {pb_dir}"
             continue
 
-        frame_data = load_frames_by_files(pb_dir, seg['pb_files'])
+        # 加载单个 pb 文件
+        pb_file = sample['pb_file']
+        frame_data = load_frames_by_files(pb_dir, [pb_file])
 
         if not frame_data:
-            seg['confirmed'] = False
-            seg['confirm_reason'] = "无有效帧数据"
+            sample['confirmed'] = False
+            sample['confirm_reason'] = "无有效帧数据"
             continue
 
         # 算法二次确认
-        confirm_scene(seg, frame_data)
+        confirm_scene(sample, frame_data)
 
-        if not seg.get('confirmed', False):
+        if not sample.get('confirmed', False):
             continue
 
         # 合规检查
-        check_compliance(seg, frame_data)
+        check_compliance(sample, frame_data)
 
         # ===== 特征提取 =====
-        features = extract_all_features(frame_data, seg['pb_files'])
+        features = extract_all_features(frame_data, [pb_file])
         if features is not None:
-            seg['general_features'] = extract_general_features(features, features)
-            seg['scene_features'] = extract_scene_features(
-                features, seg['scene_type']
+            sample['general_features'] = extract_general_features(features, features)
+            sample['scene_features'] = extract_scene_features(
+                features, sample['scene_type']
             )
-            seg['features'] = features
+            sample['features'] = features
 
     # ===== 输出 =====
     print("\n[Stage 6] 输出")
@@ -175,19 +177,19 @@ def run_pipeline(
 
     # 训练清单
     manifest_path = os.path.join(output_dir, "training_manifest.json")
-    write_manifest(all_segments, manifest_path)
+    write_manifest(all_samples, manifest_path)
 
     # 特征文件
-    feature_path = write_features(all_segments, output_dir)
+    feature_path = write_features(all_samples, output_dir)
 
     # 汇总
     elapsed = (datetime.now() - start_time).total_seconds()
-    confirmed = sum(1 for s in all_segments if s.get('confirmed', False))
-    compliant = sum(1 for s in all_segments
+    confirmed = sum(1 for s in all_samples if s.get('confirmed', False))
+    compliant = sum(1 for s in all_samples
                     if s.get('compliance', {}).get('passed', False))
 
     summary = {
-        "total_candidates": len(all_segments),
+        "total_samples": len(all_samples),
         "confirmed": confirmed,
         "compliant": compliant,
         "elapsed_seconds": round(elapsed, 1),
@@ -197,7 +199,7 @@ def run_pipeline(
 
     print(f"\n{'=' * 60}")
     print(f"流水线完成 ({elapsed:.1f}s)")
-    print(f"  候选: {len(all_segments)}")
+    print(f"  采样: {len(all_samples)}")
     print(f"  已确认: {confirmed}")
     print(f"  合规: {compliant}")
     print(f"{'=' * 60}")

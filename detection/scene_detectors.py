@@ -393,7 +393,7 @@ def extract_segment_features(
         if f in frame_data:
             valid_frames.append((f, frame_data[f]))
 
-    if len(valid_frames) < 3:
+    if len(valid_frames) < 1:
         return None
 
     time_list = []
@@ -882,7 +882,7 @@ def confirm_lane_change(
             "metrics": {"avg_curvature": avg_curv},
         }
 
-    # 横向位置变化检查 (变道应有明显横向位移)
+    # 横向位置变化检查 (变道应有明显横向位移) TODO: 出错，坐标系会随自车变化
     lateral_range = float(np.max(lateral_pos) - np.min(lateral_pos))
     if lateral_range < 1.0:
         return {
