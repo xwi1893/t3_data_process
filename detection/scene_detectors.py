@@ -303,19 +303,15 @@ def _concat_features(
     Returns:
         拼接后的完整特征 dict
     """
-    # 需要拼接的 list 类型字段
+    # 需要拼接的 list 类型字段 (动态特征)
     list_fields = [
         'speed', 'yaw', 'yaw_rate', 'lead_dist', 'lead_speed',
         'lateral_pos', 'lane_width', 'curvature',
-        'is_at_intersection', 'has_stopline', 'has_traffic_light',
-        'is_turning', 'is_u_turn',
     ]
 
-    # 从当前特征获取默认值 (用于历史/未来中缺失的字段)
+    # 动态特征默认值 (用于历史/未来中缺失的字段)
     defaults = {
         'lateral_pos': 0.0, 'lane_width': 3.5, 'curvature': 0.0,
-        'is_at_intersection': False, 'has_stopline': False,
-        'has_traffic_light': False, 'is_turning': False, 'is_u_turn': False,
     }
 
     result = {}
@@ -325,13 +321,10 @@ def _concat_features(
         curr_vals = current_feats.get(field, [])
         fut_vals = future_feats.get(field, [])
 
-        # 历史/未来可能缺少某些字段，用默认值补齐
         if not hist_vals and history_feats:
-            default = defaults.get(field, 0.0)
-            hist_vals = [default] * len(history_feats.get('speed', []))
+            hist_vals = [defaults.get(field, 0.0)] * len(history_feats.get('speed', []))
         if not fut_vals and future_feats:
-            default = defaults.get(field, 0.0)
-            fut_vals = [default] * len(future_feats.get('speed', []))
+            fut_vals = [defaults.get(field, 0.0)] * len(future_feats.get('speed', []))
 
         result[field] = hist_vals + curr_vals + fut_vals
 
@@ -551,6 +544,28 @@ def extract_segment_features(
     result['lateral_acc'] = result['speed'] * result['yaw_rate']
     result['fps'] = 10.0
 
+    # 静态特征: 直接从当前帧取标量值
+    if current_feats.get('is_at_intersection'):
+        result['is_at_intersection'] = current_feats['is_at_intersection'][0]
+    else:
+        result['is_at_intersection'] = False
+    if current_feats.get('has_stopline'):
+        result['has_stopline'] = current_feats['has_stopline'][0]
+    else:
+        result['has_stopline'] = False
+    if current_feats.get('has_traffic_light'):
+        result['has_traffic_light'] = current_feats['has_traffic_light'][0]
+    else:
+        result['has_traffic_light'] = False
+    if current_feats.get('is_turning'):
+        result['is_turning'] = current_feats['is_turning'][0]
+    else:
+        result['is_turning'] = False
+    if current_feats.get('is_u_turn'):
+        result['is_u_turn'] = current_feats['is_u_turn'][0]
+    else:
+        result['is_u_turn'] = False
+
     return result
 
 
@@ -642,18 +657,17 @@ def confirm_intersection_stop(
     """
     speed = np.array(features["speed"])
     lead_dist = np.array(features["lead_dist"])
-    is_at_intersection = np.array(features["is_at_intersection"])
+    is_at_intersection = features["is_at_intersection"]
 
     if len(speed) < 3:
         return {"confirmed": False, "reason": "帧数不足"}
 
-    # 路口比例
-    intersection_ratio = np.sum(is_at_intersection) / len(is_at_intersection)
-    if intersection_ratio < config["min_intersection_ratio"]:
+    # 路口判断 (静态特征, 直接用当前帧布尔值)
+    if not is_at_intersection:
         return {
             "confirmed": False,
-            "reason": f"路口比例不足: {intersection_ratio:.2f} < {config['min_intersection_ratio']}",
-            "metrics": {"intersection_ratio": float(intersection_ratio)},
+            "reason": "非路口区域",
+            "metrics": {"is_at_intersection": False},
         }
 
     # 检查停车
@@ -674,7 +688,7 @@ def confirm_intersection_stop(
             "confirmed": False,
             "reason": f"停车时非头车: 头车比例 {first_vehicle_ratio:.2f}",
             "metrics": {
-                "intersection_ratio": float(intersection_ratio),
+                "is_at_intersection": False,
                 "first_vehicle_ratio": float(first_vehicle_ratio),
             },
         }
@@ -683,10 +697,10 @@ def confirm_intersection_stop(
         "confirmed": True,
         "reason": "路口停车确认通过",
         "metrics": {
-            "intersection_ratio": float(intersection_ratio),
+            "is_at_intersection": True,
             "first_vehicle_ratio": float(first_vehicle_ratio),
-            "stopline_ratio": float(np.mean(features["has_stopline"])),
-            "traffic_light_ratio": float(np.mean(features["has_traffic_light"])),
+            "has_stopline": bool(features["has_stopline"]),
+            "has_traffic_light": bool(features["has_traffic_light"]),
         },
     }
 
@@ -858,19 +872,18 @@ def confirm_lane_change(
     yaw_rate = np.array(features["yaw_rate"])
     curvature = np.array(features["curvature"])
     lateral_pos = np.array(features["lateral_pos"])
-    is_at_intersection = np.array(features["is_at_intersection"])
+    is_at_intersection = features["is_at_intersection"]
     lead_dist = np.array(features["lead_dist"])
 
     if len(yaw_rate) < 3:
         return {"confirmed": False, "reason": "帧数不足"}
 
-    # 路口比例
-    intersection_ratio = float(np.mean(is_at_intersection))
-    if intersection_ratio > config["max_intersection_ratio"]:
+    # 路口判断 (静态特征, 直接用当前帧布尔值)
+    if is_at_intersection:
         return {
             "confirmed": False,
-            "reason": f"路口比例过高: {intersection_ratio:.2f}",
-            "metrics": {"intersection_ratio": intersection_ratio},
+            "reason": "路口区域内，不适用变道检测",
+            "metrics": {"is_at_intersection": True},
         }
 
     # 横摆角速度检查
@@ -919,7 +932,7 @@ def confirm_lane_change(
         "confirmed": True,
         "reason": "变道确认通过",
         "metrics": {
-            "intersection_ratio": intersection_ratio,
+            "is_at_intersection": False,
             "avg_yaw_rate": avg_yaw,
             "max_yaw_rate": max_yaw,
             "avg_curvature": avg_curv,

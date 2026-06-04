@@ -2,6 +2,7 @@ __pycache__
 .qodercn
 reference
 .cache
+.vscode
 PRD.md
 test/downloads
 test/test_output

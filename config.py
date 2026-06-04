@@ -67,7 +67,6 @@ MERGE_PARAMS = {
 # 移植自参考项目的检测阈值
 DETECTION_PARAMS = {
     "intersection_stop": {
-        "min_intersection_ratio": 0.6,
         "min_first_vehicle_ratio": 0.6,
         "window_size": 600,
     },
@@ -89,10 +88,9 @@ DETECTION_PARAMS = {
         "min_lead_ratio": 0.6,
     },
     "lane_change": {
-        "max_intersection_ratio": 0.05,
         "yaw_rate_threshold": 0.1,
         "curvature_threshold": 0.08,
-        "max_yaw_rate": 0.2,
+        "max_yaw_rate": 0.5,
         "max_avg_curvature": 0.08,
         "window_size": 600,
     },
