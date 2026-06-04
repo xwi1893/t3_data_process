@@ -45,11 +45,11 @@ def _find_lead_agent(agents: list, lead_agent: Optional[dict]) -> Optional[dict]
     """
     if lead_agent is None:
         return None
-    lead_id = lead_agent.get('id', -1)
-    if lead_id < 0:
+    lead_id = lead_agent.get('id')
+    if not lead_id:
         return None
     for a in agents:
-        if a.get('id', -1) == lead_id:
+        if a.get('id') == lead_id:
             if not a.get('agent_mask', False):
                 return None  # agent 整体无效
             return a
@@ -164,6 +164,7 @@ def _extract_history_features(frame: dict, fps: int = 10) -> dict:
     yaw_rate_list = []
     lead_dist_list = []
     lead_speed_list = []
+    lateral_pos_list = []
 
     valid_count = 0
     for i in range(n_steps):
@@ -186,6 +187,8 @@ def _extract_history_features(frame: dict, fps: int = 10) -> dict:
             yaw_rate_list.append(yaw_rates[i] if i < len(yaw_rates) else 0.0)
             lead_dist_list.append(lead_dists[i])
             lead_speed_list.append(lead_speeds[i])
+            # 横向位置: ego 轨迹 y 分量
+            lateral_pos_list.append(positions[i][1] if i < len(positions) and len(positions[i]) > 1 else 0.0)
 
     return {
         'time': time_list,
@@ -194,6 +197,7 @@ def _extract_history_features(frame: dict, fps: int = 10) -> dict:
         'yaw_rate': yaw_rate_list,
         'lead_dist': lead_dist_list,
         'lead_speed': lead_speed_list,
+        'lateral_pos': lateral_pos_list,
     }
 
 
@@ -248,6 +252,7 @@ def _extract_future_features(frame: dict, fps: int = 10) -> dict:
     yaw_rate_list = []
     lead_dist_list = []
     lead_speed_list = []
+    lateral_pos_list = []
 
     for i in range(n_steps):
         if i < len(masks) and not masks[i]:
@@ -267,6 +272,8 @@ def _extract_future_features(frame: dict, fps: int = 10) -> dict:
             yaw_rate_list.append(yaw_rates[i] if i < len(yaw_rates) else 0.0)
             lead_dist_list.append(lead_dists[i])
             lead_speed_list.append(lead_speeds[i])
+            # 横向位置: ego 轨迹 y 分量
+            lateral_pos_list.append(positions[i][1] if i < len(positions) and len(positions[i]) > 1 else 0.0)
 
     return {
         'time': time_list,
@@ -275,6 +282,7 @@ def _extract_future_features(frame: dict, fps: int = 10) -> dict:
         'yaw_rate': yaw_rate_list,
         'lead_dist': lead_dist_list,
         'lead_speed': lead_speed_list,
+        'lateral_pos': lateral_pos_list,
     }
 
 
@@ -531,7 +539,19 @@ def extract_segment_features(
                     future_feats[k] = v[:max_fut]
 
     # 拼接: history + current + future
-    return _concat_features(history_feats, current_feats, future_feats, fps)
+    result = _concat_features(history_feats, current_feats, future_feats, fps)
+
+    # list → numpy
+    for key in list(result.keys()):
+        if isinstance(result[key], list):
+            result[key] = np.array(result[key])
+
+    # 补齐字段 (供 scene_extractors / general_features 使用)
+    result['time_sec'] = result['time']
+    result['lateral_acc'] = result['speed'] * result['yaw_rate']
+    result['fps'] = 10.0
+
+    return result
 
 
 # ============================================================

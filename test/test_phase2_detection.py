@@ -162,7 +162,6 @@ def test_end_to_end_from_phase1(phase1_output: str, output_dir: str,
     from data_loader.pb_loader import load_frames_by_files
     from detection.detector import confirm_scene
     from compliance.checker import check_compliance
-    from feature_extraction.base_extractor import extract_all_features
     from feature_extraction.general_features import extract_general_features
     from feature_extraction.scene_extractors import extract_scene_features
     from output.training_manifest import write_manifest
@@ -223,13 +222,12 @@ def test_end_to_end_from_phase1(phase1_output: str, output_dir: str,
         compliance_passed = sample.get('compliance', {}).get('passed', False)
         print(f"    合规: [{'通过' if compliance_passed else '不通过'}]")
 
-        # 特征提取
+        # 复用 confirm_scene 已提取的特征
         print(f"  [4/5] 特征提取...")
-        features = extract_all_features(frame_data, [pb_file])
+        features = sample.get('features')
         if features is not None:
             sample['general_features'] = extract_general_features(features, features)
             sample['scene_features'] = extract_scene_features(features, sample['scene_type'])
-            sample['features'] = features
             print(f"    特征: 通用 {len(sample['general_features'])} 个, "
                   f"场景 {len(sample['scene_features'])} 个")
 

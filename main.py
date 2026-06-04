@@ -3,9 +3,11 @@ main.py
 场景清洗与提取 - CLI 入口与流水线编排
 
 用法:
-    python main.py
-    python main.py --config config_override.json
-    python main.py --output-dir /path/to/output
+    python main.py                   # 运行全部阶段
+    python main.py --phase 1         # 仅标签筛选 + k帧采样
+    python main.py --phase 2         # 仅检测确认 + 特征提取
+    python main.py --phase 1 2       # 依次运行两阶段
+    python main.py --config override.json --output-dir /path
 """
 
 import argparse
@@ -13,47 +15,30 @@ import json
 import os
 import sys
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
-from config import DATA_PATHS, PERFORMANCE_CFG, SCENE_LABEL_MAP, COMPOUND_LABEL_RULES
+from config import DATA_PATHS, PERFORMANCE_CFG
 from data_loader.index_loader import (
     load_driver_split, build_driver_reverse_index,
     load_data_batch, load_merged_date_split,
-    load_frame_scene, lookup_driver_id, check_label_prescreen,
+    load_frame_scene, lookup_driver_id,
 )
 from data_loader.pb_loader import load_frames_by_files
 from grouper.segment_merger import group_and_sample
 from detection.detector import confirm_scene
 from compliance.checker import check_compliance
-from feature_extraction.base_extractor import extract_all_features
 from feature_extraction.general_features import extract_general_features
 from feature_extraction.scene_extractors import extract_scene_features
 from output.training_manifest import write_manifest
 from output.feature_writer import write_features
 
 
-def _get_tqdm():
-    """获取 tqdm 进度条，若未安装则回退到无操作"""
-    if not PERFORMANCE_CFG.get("progress_bar", True):
-        return lambda x, **kw: x
-    try:
-        from tqdm import tqdm
-        return tqdm
-    except ImportError:
-        return lambda x, **kw: x
-
-
-def _get_target_labels() -> set:
-    """获取所有目标标签集合 (用于预筛)"""
-    labels = set(SCENE_LABEL_MAP.keys())
-    for rule in COMPOUND_LABEL_RULES:
-        labels.update(rule["required_labels"])
-    return labels
-
+# ============================================================
+# 工具函数
+# ============================================================
 
 def load_config_override(config_path: str) -> dict:
     """加载配置覆盖文件"""
@@ -63,76 +48,26 @@ def load_config_override(config_path: str) -> dict:
         return json.load(f)
 
 
-def _process_single_batch(
-    batch_dir: str,
-    driver_reverse_index: dict,
-    date_split: dict,
-    target_labels: set,
-    use_prescreen: bool,
-) -> list:
-    """处理单个 batch 的 dir_key 目录，返回候选片段列表
+# ============================================================
+# Phase 1: 标签筛选 + 连续场景分段 + k 帧采样
+# ============================================================
 
-    可作为 ProcessPoolExecutor 的 worker 函数
-
-    Args:
-        batch_dir: batch 目录路径
-        driver_reverse_index: (date, vehicle_id) -> driver_id
-        date_split: {dir_key: cloud_path}
-        target_labels: 目标标签集合 (用于预筛)
-        use_prescreen: 是否启用 label_count.json 预筛
-
-    Returns:
-        候选片段列表
-    """
-    segments = []
-    date_dir = os.path.join(batch_dir, "date")
-    if not os.path.isdir(date_dir):
-        return segments
-
-    for dir_key in os.listdir(date_dir):
-        dir_path = os.path.join(date_dir, dir_key)
-        if not os.path.isdir(dir_path):
-            continue
-
-        # 验证 driver_id
-        driver_id = lookup_driver_id(dir_key, driver_reverse_index)
-        if driver_id is None:
-            continue
-
-        # 预筛: 通过 label_count.json 快速判断是否包含目标标签
-        if use_prescreen and not check_label_prescreen(dir_path, target_labels):
-            continue
-
-        # 加载 frame_scene.json
-        fs_path = os.path.join(dir_path, "frame_scene.json")
-        if not os.path.exists(fs_path):
-            continue
-
-        frame_scene = load_frame_scene(fs_path)
-        batch_samples = group_and_sample(
-            frame_scene, dir_key, driver_reverse_index, date_split
-        )
-        segments.extend(batch_samples)
-
-    return segments
-
-
-def run_pipeline(
+def run_phase1(
     data_batch_file: str = "",
     driver_split_file: str = "",
     output_dir: str = "",
 ) -> dict:
-    """执行完整流水线
+    """Phase 1: 标签筛选 + k 帧采样
 
     Stage 1: 驾驶员索引加载
     Stage 2: Batch 发现
     Stage 3: date_split 加载与合并
     Stage 4: 标签筛选 + 连续场景分段 + k 帧采样
-    Stage 5: 单帧数据加载 + 检测确认 + 合规检查
-    Stage 6: 特征提取 + 输出
+
+    输出: {output_dir}/phase1_samples.json
     """
     print("=" * 60)
-    print("场景清洗与提取流水线")
+    print("Phase 1: 标签筛选 + k 帧采样")
     print("=" * 60)
     start_time = datetime.now()
 
@@ -201,15 +136,71 @@ def run_pipeline(
     print(f"  跳过(无 frame_scene): {skipped_no_scene}")
     print(f"  总计 {len(all_samples)} 个采样条目")
 
+    # 保存中间结果
+    if not output_dir:
+        output_dir = os.path.join(PROJECT_ROOT, "output_data")
+    os.makedirs(output_dir, exist_ok=True)
+
+    phase1_path = os.path.join(output_dir, "phase1_samples.json")
+    serializable = [
+        {k: v for k, v in s.items()
+         if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+        for s in all_samples
+    ]
+    with open(phase1_path, 'w', encoding='utf-8') as f:
+        json.dump(serializable, f, ensure_ascii=False, indent=2)
+
+    elapsed = (datetime.now() - start_time).total_seconds()
+    print(f"\n{'=' * 60}")
+    print(f"Phase 1 完成 ({elapsed:.1f}s)")
+    print(f"  采样: {len(all_samples)}")
+    print(f"  已保存: {phase1_path}")
+    print(f"{'=' * 60}")
+
+    return {
+        "total_samples": len(all_samples),
+        "phase1_path": phase1_path,
+        "elapsed_seconds": round(elapsed, 1),
+    }
+
+
+# ============================================================
+# Phase 2: 检测确认 + 合规检查 + 特征提取 + 输出
+# ============================================================
+
+def run_phase2(output_dir: str = "") -> dict:
+    """Phase 2: 检测确认 + 特征提取
+
+    加载 Phase 1 中间结果，执行:
+    Stage 5: 单帧数据加载 + 检测确认 + 合规检查 + 特征提取
+    Stage 6: 输出 (training_manifest + features)
+    """
+    print("=" * 60)
+    print("Phase 2: 检测确认 + 特征提取")
+    print("=" * 60)
+    start_time = datetime.now()
+
+    if not output_dir:
+        output_dir = os.path.join(PROJECT_ROOT, "output_data")
+
+    # 加载 Phase 1 中间结果
+    phase1_path = os.path.join(output_dir, "phase1_samples.json")
+    if not os.path.exists(phase1_path):
+        print(f"[错误] Phase 1 输出不存在: {phase1_path}")
+        print("请先运行 Phase 1")
+        return {"error": "无 Phase 1 输出"}
+
+    with open(phase1_path, 'r', encoding='utf-8') as f:
+        all_samples = json.load(f)
+    print(f"  加载 Phase 1 采样: {len(all_samples)} 个")
+
     if not all_samples:
-        print("[结束] 无采样条目")
         return {"total_samples": 0}
 
-    # ===== Stage 5: 单帧数据加载 + 检测确认 + 合规检查 =====
-    print("\n[Stage 5] 单帧数据加载 + 检测确认 + 合规检查")
+    # ===== Stage 5: 单帧数据加载 + 检测确认 + 合规检查 + 特征提取 =====
+    print("\n[Stage 5] 单帧数据加载 + 检测确认 + 合规检查 + 特征提取")
 
     for sample in all_samples:
-        # 从 sample 的 cloud_path 推导 pb 目录
         pb_dir = sample.get('cloud_path', '')
 
         if not pb_dir or not os.path.isdir(pb_dir):
@@ -218,7 +209,6 @@ def run_pipeline(
             sample['confirm_reason'] = f"pb 目录不存在: {pb_dir}"
             continue
 
-        # 加载单个 pb 文件
         pb_file = sample['pb_file']
         frame_data = load_frames_by_files(pb_dir, [pb_file])
 
@@ -236,27 +226,21 @@ def run_pipeline(
         # 合规检查
         check_compliance(sample, frame_data)
 
-        # ===== 特征提取 =====
-        features = extract_all_features(frame_data, [pb_file])
+        # 复用 confirm_scene 已提取的特征
+        features = sample.get('features')
         if features is not None:
             sample['general_features'] = extract_general_features(features, features)
             sample['scene_features'] = extract_scene_features(
                 features, sample['scene_type']
             )
-            sample['features'] = features
 
-    # ===== 输出 =====
+    # ===== Stage 6: 输出 =====
     print("\n[Stage 6] 输出")
-    if not output_dir:
-        output_dir = os.path.join(PROJECT_ROOT, "output_data")
-
     os.makedirs(output_dir, exist_ok=True)
 
-    # 训练清单
     manifest_path = os.path.join(output_dir, "training_manifest.json")
     write_manifest(all_samples, manifest_path)
 
-    # 特征文件
     feature_path = write_features(all_samples, output_dir)
 
     # 汇总
@@ -275,7 +259,7 @@ def run_pipeline(
     }
 
     print(f"\n{'=' * 60}")
-    print(f"流水线完成 ({elapsed:.1f}s)")
+    print(f"Phase 2 完成 ({elapsed:.1f}s)")
     print(f"  采样: {len(all_samples)}")
     print(f"  已确认: {confirmed}")
     print(f"  合规: {compliant}")
@@ -284,8 +268,15 @@ def run_pipeline(
     return summary
 
 
+# ============================================================
+# CLI 入口
+# ============================================================
+
 def main():
     parser = argparse.ArgumentParser(description="场景清洗与提取")
+    parser.add_argument("--phase", type=int, nargs='+', default=[1, 2],
+                        choices=[1, 2],
+                        help="运行阶段: 1(筛选采样) 2(检测提取), 默认全部")
     parser.add_argument("--config", type=str, default="",
                         help="配置覆盖文件路径 (JSON)")
     parser.add_argument("--output-dir", type=str, default="",
@@ -305,21 +296,26 @@ def main():
         override = load_config_override(args.config)
         paths.update(override.get("data_paths", {}))
 
-    # 验证路径
-    required = ["driver_split_file", "data_batch_file"]
-    missing = [k for k in required if not paths.get(k)]
-    if missing:
-        print(f"错误: 缺少必要路径配置: {', '.join(missing)}")
-        print("请通过命令行参数或 config.py 中的 DATA_PATHS 配置")
-        sys.exit(1)
+    # 验证路径 (Phase 2 单独运行时不需要索引文件)
+    if 1 in args.phase:
+        required = ["driver_split_file", "data_batch_file"]
+        missing = [k for k in required if not paths.get(k)]
+        if missing:
+            print(f"错误: 缺少必要路径配置: {', '.join(missing)}")
+            print("请通过命令行参数或 config.py 中的 DATA_PATHS 配置")
+            sys.exit(1)
 
-    summary = run_pipeline(
-        data_batch_file=paths["data_batch_file"],
-        driver_split_file=paths["driver_split_file"],
-        output_dir=paths["output_dir"],
-    )
+    output_dir = paths["output_dir"]
 
-    return summary
+    if 1 in args.phase:
+        run_phase1(
+            data_batch_file=paths["data_batch_file"],
+            driver_split_file=paths["driver_split_file"],
+            output_dir=output_dir,
+        )
+
+    if 2 in args.phase:
+        run_phase2(output_dir=output_dir)
 
 
 if __name__ == "__main__":

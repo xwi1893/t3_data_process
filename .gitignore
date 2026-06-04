@@ -2,5 +2,6 @@ __pycache__
 .qodercn
 reference
 .cache
+PRD.md
 test/downloads
 test/test_output
