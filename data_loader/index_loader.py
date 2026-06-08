@@ -164,10 +164,11 @@ def load_merged_date_split(
 
 def load_frame_scene(path: str) -> Dict[str, List[str]]:
     """加载单个 frame_scene.json
-    返回: {pb_filename: [labels]}
+    返回: {pb_filename: [labels]} (仅包含 .pb 结尾的文件，排除 .pb.gz)
     """
     data = load_json(path)
-    return data
+    # 过滤: 只保留 .pb 结尾的文件
+    return {k: v for k, v in data.items() if k.endswith('.pb') and not k.endswith('.pb.gz')}
 
 
 def check_label_prescreen(
@@ -245,6 +246,8 @@ def extract_timestamp_from_pb_filename(pb_filename: str) -> int:
     输出: 1771887926405091968
     """
     name = pb_filename
-    if name.endswith('.pb'):
+    if name.endswith('.pb.gz'):
+        name = name[:-6]
+    elif name.endswith('.pb'):
         name = name[:-3]
     return int(name)

@@ -878,13 +878,13 @@ def confirm_lane_change(
     if len(yaw_rate) < 3:
         return {"confirmed": False, "reason": "帧数不足"}
 
-    # 路口判断 (静态特征, 直接用当前帧布尔值)
-    if is_at_intersection:
-        return {
-            "confirmed": False,
-            "reason": "路口区域内，不适用变道检测",
-            "metrics": {"is_at_intersection": True},
-        }
+    # # 路口判断 (静态特征, 直接用当前帧布尔值)
+    # if is_at_intersection:
+    #     return {
+    #         "confirmed": False,
+    #         "reason": "路口区域内，不适用变道检测",
+    #         "metrics": {"is_at_intersection": True},
+    #     }
 
     # 横摆角速度检查
     abs_yaw_rate = np.abs(yaw_rate)
@@ -905,7 +905,7 @@ def confirm_lane_change(
             "metrics": {"avg_yaw_rate": avg_yaw, "max_yaw_rate": max_yaw},
         }
 
-    # 曲率检查
+# 曲率检查
     abs_curv = np.abs(curvature)
     avg_curv = float(np.mean(abs_curv))
     if avg_curv > config.get("max_avg_curvature", 0.08):

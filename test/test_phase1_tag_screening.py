@@ -432,14 +432,12 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     phase1_output = os.path.join(output_dir, "phase1_samples.json")
 
-    serializable = []
-    for s in all_samples:
-        entry = {k: v for k, v in s.items()
-                 if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
-        serializable.append(entry)
-
-    with open(phase1_output, 'w', encoding='utf-8') as f:
-        json.dump(serializable, f, ensure_ascii=False, indent=2)
+    from output.streaming_writer import StreamingJsonArrayWriter
+    with StreamingJsonArrayWriter(phase1_output) as writer:
+        for s in all_samples:
+            entry = {k: v for k, v in s.items()
+                     if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+            writer.append(entry)
 
     # 总结
     elapsed = (datetime.now() - start_time).total_seconds()
@@ -449,7 +447,7 @@ def main():
     print(f"  处理 batch: {len(batch_dirs)} 个")
     print(f"  处理目录:   {stats['processed']} 个")
     print(f"  候选采样:   {len(all_samples)} 个")
-    print(f"  采样已保存: {phase1_output} ({len(serializable)} 个)")
+    print(f"  采样已保存: {phase1_output} ({len(all_samples)} 个)")
     print("  阶段2 测试请运行:")
     print("    python test/test_phase2_detection.py")
 

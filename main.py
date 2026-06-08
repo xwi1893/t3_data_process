@@ -32,6 +32,7 @@ from detection.detector import confirm_scene
 from compliance.checker import check_compliance
 from feature_extraction.general_features import extract_general_features
 from feature_extraction.scene_extractors import extract_scene_features
+from output.streaming_writer import StreamingJsonArrayWriter
 from output.training_manifest import write_manifest
 from output.feature_writer import write_features
 
@@ -96,69 +97,68 @@ def run_phase1(
 
     # ===== Stage 4: 标签筛选 + 连续场景分段 + k 帧采样 =====
     print("\n[Stage 4] 标签筛选 + 连续场景分段 + k 帧采样")
-    all_samples = []
     total_dirs = 0
     skipped_no_driver = 0
     skipped_no_scene = 0
-
-    for batch_dir in batch_dirs:
-        date_dir = os.path.join(batch_dir, "date")
-        if not os.path.isdir(date_dir):
-            print(f"  [跳过] date 目录不存在: {date_dir}")
-            continue
-
-        for dir_key in os.listdir(date_dir):
-            dir_path = os.path.join(date_dir, dir_key)
-            if not os.path.isdir(dir_path):
-                continue
-            total_dirs += 1
-
-            # 验证 driver_id
-            driver_id = lookup_driver_id(dir_key, driver_reverse_index)
-            if driver_id is None:
-                skipped_no_driver += 1
-                continue
-
-            # 加载 frame_scene.json
-            fs_path = os.path.join(dir_path, "frame_scene.json")
-            if not os.path.exists(fs_path):
-                skipped_no_scene += 1
-                continue
-
-            frame_scene = load_frame_scene(fs_path)
-            samples = group_and_sample(
-                frame_scene, dir_key, driver_reverse_index, date_split
-            )
-            all_samples.extend(samples)
-
-    print(f"\n  扫描目录: {total_dirs}")
-    print(f"  跳过(无 driver_id): {skipped_no_driver}")
-    print(f"  跳过(无 frame_scene): {skipped_no_scene}")
-    print(f"  总计 {len(all_samples)} 个采样条目")
+    total_samples = 0
 
     # 保存中间结果
     if not output_dir:
         output_dir = os.path.join(PROJECT_ROOT, "output_data")
     os.makedirs(output_dir, exist_ok=True)
-
     phase1_path = os.path.join(output_dir, "phase1_samples.json")
-    serializable = [
-        {k: v for k, v in s.items()
-         if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
-        for s in all_samples
-    ]
-    with open(phase1_path, 'w', encoding='utf-8') as f:
-        json.dump(serializable, f, ensure_ascii=False, indent=2)
+
+    with StreamingJsonArrayWriter(phase1_path) as writer:
+        for batch_dir in batch_dirs:
+            date_dir = os.path.join(batch_dir, "date")
+            if not os.path.isdir(date_dir):
+                print(f"  [跳过] date 目录不存在: {date_dir}")
+                continue
+
+            for dir_key in os.listdir(date_dir):
+                dir_path = os.path.join(date_dir, dir_key)
+                if not os.path.isdir(dir_path):
+                    continue
+                total_dirs += 1
+
+                # 验证 driver_id
+                driver_id = lookup_driver_id(dir_key, driver_reverse_index)
+                if driver_id is None:
+                    skipped_no_driver += 1
+                    continue
+
+                # 加载 frame_scene.json
+                fs_path = os.path.join(dir_path, "frame_scene.json")
+                if not os.path.exists(fs_path):
+                    skipped_no_scene += 1
+                    continue
+
+                frame_scene = load_frame_scene(fs_path)
+                samples = group_and_sample(
+                    frame_scene, dir_key, driver_reverse_index, date_split
+                )
+
+                # 流式写入每个采样条目
+                for s in samples:
+                    entry = {k: v for k, v in s.items()
+                             if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                    writer.append(entry)
+                    total_samples += 1
+
+    print(f"\n  扫描目录: {total_dirs}")
+    print(f"  跳过(无 driver_id): {skipped_no_driver}")
+    print(f"  跳过(无 frame_scene): {skipped_no_scene}")
+    print(f"  总计 {total_samples} 个采样条目")
 
     elapsed = (datetime.now() - start_time).total_seconds()
     print(f"\n{'=' * 60}")
     print(f"Phase 1 完成 ({elapsed:.1f}s)")
-    print(f"  采样: {len(all_samples)}")
+    print(f"  采样: {total_samples}")
     print(f"  已保存: {phase1_path}")
     print(f"{'=' * 60}")
 
     return {
-        "total_samples": len(all_samples),
+        "total_samples": total_samples,
         "phase1_path": phase1_path,
         "elapsed_seconds": round(elapsed, 1),
     }

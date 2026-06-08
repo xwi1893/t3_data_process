@@ -7,7 +7,7 @@
 | 类型 | 名称 | 触发标签 |
 |------|------|----------|
 | Scene 1 | 路口停车 | `at_intersection` + `brake2stop`|
-| Scene 2 | 起步 | `static2move` |
+| Scene 2 | 头车起步 | `static2move` |
 | Scene 3 | 跟车 | `longi_interaction_follow_front_large_vehicle`, `longi_interaction_follow_front_small_vehicle` |
 | Scene 4 | 跟停 | `brake2stop` |
 | Scene 5 | 变道 | `left_lane_change_effi`, `right_lane_change_effi` |
