@@ -27,6 +27,7 @@ class StreamingJsonArrayWriter:
     def __enter__(self):
         self._f = open(self.path, 'w', encoding='utf-8')
         self._f.write('[\n')
+        self._f.flush()
         return self
 
     def __exit__(self, *exc):
@@ -35,7 +36,7 @@ class StreamingJsonArrayWriter:
             self._f.close()
 
     def append(self, obj: Any):
-        """写入一个条目"""
+        """写入一个条目并立即刷盘"""
         if self._count > 0:
             self._f.write(',\n')
         text = json.dumps(obj, ensure_ascii=False, indent=2,
@@ -44,6 +45,8 @@ class StreamingJsonArrayWriter:
         indented = '\n  '.join(text.split('\n'))
         self._f.write('  ' + indented)
         self._count += 1
+        if self._count % 10 == 0:
+            self._f.flush()
 
     @property
     def count(self) -> int:
