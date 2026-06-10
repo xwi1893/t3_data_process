@@ -8,7 +8,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import SCENE_LABEL_MAP, COMPOUND_LABEL_RULES
+from config import SCENE_LABEL_MAP, COMPOUND_LABEL_RULES, SCENE_EXCLUDE_RULES
 
 
 def classify_frame(labels: List[str]) -> Optional[Tuple[int, str, str]]:
@@ -16,7 +16,8 @@ def classify_frame(labels: List[str]) -> Optional[Tuple[int, str, str]]:
 
     匹配规则 (按优先级):
     1. 复合标签规则: 需要多个标签同时存在 (如路口停车需 at_intersection + brake2stop)
-    2. 单标签规则: 遍历标签列表，匹配 SCENE_LABEL_MAP 中第一个有效标签
+    2. 排除标签规则: 需要某些标签存在且某些标签不存在 (如跟车需 non_intersection_lane_keep 且无 large_curvature_lane_keep)
+    3. 单标签规则: 遍历标签列表，匹配 SCENE_LABEL_MAP 中第一个有效标签
 
     Args:
         labels: 帧标签列表, 如 ["brake2stop", "at_intersection", "across"]
@@ -35,6 +36,12 @@ def classify_frame(labels: List[str]) -> Optional[Tuple[int, str, str]]:
     # 优先检查复合标签规则
     for rule in COMPOUND_LABEL_RULES:
         if rule["required_labels"].issubset(label_set):
+            return rule["result"]
+
+    # 排除标签规则: required_labels 全部存在且 excluded_labels 全部不存在
+    for scene_type, rule in SCENE_EXCLUDE_RULES.items():
+        if rule["required_labels"].issubset(label_set) and \
+                not rule["excluded_labels"].intersection(label_set):
             return rule["result"]
 
     # 单标签规则: 按标签列表顺序匹配第一个

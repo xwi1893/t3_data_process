@@ -776,17 +776,40 @@ def confirm_following_vehicle(
     移植自参考项目 tiqvtest.py detect_following_vehicle()
 
     检查:
-    1. 速度 >= 5 m/s
-    2. 时距在 [0, 15] 秒内
-    3. 持续 >= 3 秒
-    4. 时距波动 <= 1.0 秒
+    1. 前车存在比例 >= 60% 且平均前车距离 <= 50m
+    2. 速度 >= 5 m/s
+    3. 时距在 [0, 15] 秒内
+    4. 持续 >= 3 秒
+    5. 时距波动 <= 1.0 秒
     """
     speed = np.array(features["speed"])
     time_headway = np.array(features["time_headway"])
     time_arr = np.array(features["time"])
+    lead_dist = np.array(features["lead_dist"])
 
     if len(speed) < 3:
         return {"confirmed": False, "reason": "帧数不足"}
+
+    # --- 前车存在性检查 ---
+    valid_lead = lead_dist > 0
+    lead_ratio = np.sum(valid_lead) / len(lead_dist) if len(lead_dist) > 0 else 0
+
+    if lead_ratio < config["min_lead_ratio"]:
+        return {
+            "confirmed": False,
+            "reason": f"前车比例不足: {lead_ratio:.2f} < {config['min_lead_ratio']}",
+            "metrics": {"lead_ratio": float(lead_ratio)},
+        }
+
+    valid_dists = lead_dist[valid_lead]
+    avg_lead_dist = float(np.mean(valid_dists)) if len(valid_dists) > 0 else float('inf')
+
+    if avg_lead_dist > config["max_lead_distance"]:
+        return {
+            "confirmed": False,
+            "reason": f"平均前车距离过大: {avg_lead_dist:.1f}m > {config['max_lead_distance']}m",
+            "metrics": {"avg_lead_dist": avg_lead_dist, "lead_ratio": float(lead_ratio)},
+        }
 
     fps = len(time_arr) / (time_arr[-1] - time_arr[0]) if len(time_arr) > 1 else 10
 
@@ -848,6 +871,8 @@ def confirm_following_vehicle(
             "headway_min": float(np.min(thw_segment)),
             "headway_max": float(np.max(thw_segment)),
             "headway_fluctuation": fluct,
+            "lead_ratio": float(lead_ratio),
+            "avg_lead_dist": avg_lead_dist,
         },
     }
 

@@ -24,16 +24,26 @@ COMPOUND_LABEL_RULES = [
 # 单标签规则: 单个标签即可匹配
 SCENE_LABEL_MAP = {
     "static2move":                                    (2, "起步",     "empty_start"),
-    "longi_interaction_follow_front_large_vehicle":   (3, "跟车",     "following_vehicle"),
-    "longi_interaction_follow_front_small_vehicle":   (3, "跟车",     "following_vehicle"),
     "brake2stop":                                     (4, "跟停",     "following_stop"),
     "left_lane_change_effi":                          (5, "变道",     "lane_change"),
     "right_lane_change_effi":                         (5, "变道",     "lane_change"),
 }
 
+# 排除标签规则: 需要某些标签存在且某些标签不存在才能匹配场景
+# 格式: {scene_type: {"required_labels": set, "excluded_labels": set}}
+SCENE_EXCLUDE_RULES = {
+    3: {
+        "required_labels": {"non_intersection_lane_keep"},
+        "excluded_labels": {"large_curvature_lane_keep"},
+        "result": (3, "跟车", "following_vehicle"),
+    },
+}
+
 # 场景类型 → 英文名的反向映射（方便查找）
 SCENE_TYPE_NAMES = {v[0]: v[2] for v in SCENE_LABEL_MAP.values()}
 SCENE_TYPE_NAMES[1] = "intersection_stop"  # 复合规则补充
+for _st, _rule in SCENE_EXCLUDE_RULES.items():
+    SCENE_TYPE_NAMES[_st] = _rule["result"][2]
 
 # === 合规检查参数 ===
 # 先沿用参考项目参数，后续可通过 JSON 配置文件覆盖
@@ -81,6 +91,8 @@ DETECTION_PARAMS = {
         "headway_max": 15.0,
         "headway_fluct_thresh": 1.0,
         "min_follow_duration": 3.0,
+        "max_lead_distance": 50.0,
+        "min_lead_ratio": 0.6,
     },
     "following_stop": {
         "max_lead_distance": 50.0,

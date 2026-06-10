@@ -8,7 +8,7 @@
 |------|------|----------|
 | Scene 1 | 路口停车 | `at_intersection` + `brake2stop`|
 | Scene 2 | 头车起步 | `static2move` |
-| Scene 3 | 跟车 | `longi_interaction_follow_front_large_vehicle`, `longi_interaction_follow_front_small_vehicle` |
+| Scene 3 | 跟车 | `non_intersection_lane_keep` - `large_curvature_lane_keep`|
 | Scene 4 | 跟停 | `brake2stop` |
 | Scene 5 | 变道 | `left_lane_change_effi`, `right_lane_change_effi` |
 
@@ -57,6 +57,7 @@ personalized_data_process/
 │   └── scene_extractors.py          # 5 种场景专用特征
 ├── output/
 │   ├── training_manifest.py         # 训练清单 JSON 生成
+|   ├── streaming_writer.py          # 流写入的writer对象
 │   └── feature_writer.py            # 场景特征输出
 └── utils/
     └── frame_utils.py               # 前车检测、横向位置、车道线等工具
@@ -76,11 +77,10 @@ personalized_data_process/
 
 ```python
 DATA_PATHS = {
-    "frame_scene_base_dir": "/path/to/frame_scenes",
-    "driver_split_file": "/path/to/driver_split.json",
-    "date_split_file": "/path/to/date_split.json",
-    "pb_data_base_dir": "/path/to/pb_data",
-    "output_dir": "/path/to/output",
+    "driver_split_file": "./reference/driver_split.json",   # driver_split.json 路径
+    "data_batch_file": "/path/to/data_batch.json",        # data_batch.json 路径 (记录所有 batch 目录)
+    "t3_root_dir": "/path/to/t3_root",            # cloud_path 中 gt_label 之前的前缀替换为此路径
+    "output_dir": "/path/to/output",                              # 输出目录
 }
 ```
 
@@ -92,14 +92,9 @@ python main.py
 
 # 或通过命令行参数覆盖
 python main.py \
-    --frame-scene-dir /path/to/frame_scenes \
-    --driver-split /path/to/driver_split.json \
-    --date-split /path/to/date_split.json \
-    --pb-dir /path/to/pb_data \
+    --phase 1 \
+    --config /path/to/config \
     --output-dir /path/to/output
-
-# 使用 JSON 配置文件覆盖
-python main.py --config config_override.json
 ```
 
 ### 3. 输出
