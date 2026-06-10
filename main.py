@@ -210,9 +210,11 @@ def run_phase2(output_dir: str = "") -> dict:
             continue
 
         pb_file = sample['pb_file']
+        full_pb_path = os.path.join(pb_dir, pb_file)
         frame_data = load_frames_by_files(pb_dir, [pb_file])
 
         if not frame_data:
+            print(f"  [拒绝] 无有效帧数据: {full_pb_path}")
             sample['confirmed'] = False
             sample['confirm_reason'] = "无有效帧数据"
             continue

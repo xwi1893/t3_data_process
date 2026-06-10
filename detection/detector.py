@@ -55,10 +55,13 @@ def confirm_scene(
     scene_type = sample['scene_type']
     scene_name = _SCENE_NAMES.get(scene_type, f"未知({scene_type})")
 
+    pb_path = os.path.join(sample.get('cloud_path', ''), sample.get('pb_file', ''))
+
     confirm_func = _CONFIRM_FUNCS.get(scene_type)
     if confirm_func is None:
         sample['confirmed'] = False
         sample['confirm_reason'] = f"无对应的确认算法: scene_type={scene_type}"
+        print(f"[detector] {scene_name} #{sample.get('sample_id', '?')}: 拒绝 - {sample['confirm_reason']} | pb: {pb_path}")
         return sample
 
     # pb_files: 兼容新版(单帧)和旧版(多帧)
@@ -69,6 +72,7 @@ def confirm_scene(
     if features is None:
         sample['confirmed'] = False
         sample['confirm_reason'] = "特征提取失败 (有效帧不足)"
+        print(f"[detector] {scene_name} #{sample.get('sample_id', '?')}: 拒绝 - {sample['confirm_reason']} | pb: {pb_path}")
         return sample
 
     # 运行确认算法
@@ -84,7 +88,8 @@ def confirm_scene(
     status = "通过" if result['confirmed'] else "拒绝"
     sample_id = sample.get('sample_id', sample.get('segment_id', '?'))
     print(f"[detector] {scene_name} #{sample_id}: "
-          f"{status} - {result.get('reason', '')}")
+          f"{status} - {result.get('reason', '')}"
+          f"{' | pb: ' + pb_path if not result['confirmed'] else ''}")
 
     return sample
 
