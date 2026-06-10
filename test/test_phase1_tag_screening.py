@@ -32,7 +32,7 @@ from datetime import datetime
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from config import DATA_PATHS, PERFORMANCE_CFG, SCENE_LABEL_MAP, COMPOUND_LABEL_RULES
+from config import DATA_PATHS, PERFORMANCE_CFG, SCENE_LABEL_MAP, COMPOUND_LABEL_RULES, SCENE_EXCLUDE_RULES
 
 
 def _get_tqdm():
@@ -50,6 +50,8 @@ def _get_target_labels() -> set:
     """获取所有目标标签集合 (用于预筛)"""
     labels = set(SCENE_LABEL_MAP.keys())
     for rule in COMPOUND_LABEL_RULES:
+        labels.update(rule["required_labels"])
+    for scene_type, rule in SCENE_EXCLUDE_RULES.items():
         labels.update(rule["required_labels"])
     return labels
 
@@ -113,10 +115,10 @@ def test_load_indexes(data_batch_path, driver_split_path, max_batches):
 
 def test_classify_labels(sample_frame_scenes):
     """测试2: 标签分类"""
-    print_header("测试2: 标签分类 (7标签 -> 5场景)")
+    print_header("测试2: 标签分类 (5场景)")
 
     from grouper.scene_classifier import classify_frame, classify_frame_scene_all
-    from config import SCENE_LABEL_MAP, COMPOUND_LABEL_RULES
+    from config import SCENE_LABEL_MAP, COMPOUND_LABEL_RULES, SCENE_EXCLUDE_RULES
 
     # 展示映射表
     print("\n  标签映射规则:")
@@ -125,6 +127,12 @@ def test_classify_labels(sample_frame_scenes):
         req = ', '.join(rule['required_labels'])
         stype, cn, en = rule['result']
         print(f"      {{{req}}} -> Scene {stype} ({cn}, {en})")
+    print("    [排除标签规则]:")
+    for scene_type, rule in SCENE_EXCLUDE_RULES.items():
+        req = ', '.join(rule['required_labels'])
+        excl = ', '.join(rule['excluded_labels'])
+        stype, cn, en = rule['result']
+        print(f"      需 {{{req}}} 且不含 {{{excl}}} -> Scene {stype} ({cn}, {en})")
     print("    [单标签规则]:")
     for label, (stype, cn, en) in SCENE_LABEL_MAP.items():
         print(f"      {label} -> Scene {stype} ({cn}, {en})")
@@ -132,15 +140,23 @@ def test_classify_labels(sample_frame_scenes):
     # 单元级测试
     print("\n  单元测试:")
     test_cases = [
+        # Scene 1: 复合规则 (路口停车)
         (["at_intersection", "brake2stop"], "Scene 1"),
         (["brake2stop", "at_intersection"], "Scene 1"),  # 顺序无关
         (["at_intersection"], "None"),  # 单独 at_intersection 不匹配
+        # Scene 2: 单标签 (起步)
         (["static2move"], "Scene 2"),
-        (["longi_interaction_follow_front_large_vehicle"], "Scene 3"),
-        (["longi_interaction_follow_front_small_vehicle"], "Scene 3"),
+        # Scene 3: 排除标签规则 (跟车)
+        (["non_intersection_lane_keep"], "Scene 3"),  # 有 required，无 excluded
+        (["non_intersection_lane_keep", "other_label"], "Scene 3"),  # 有其他标签但不含 excluded
+        (["non_intersection_lane_keep", "large_curvature_lane_keep"], "None"),  # 同时有 excluded -> 不匹配
+        (["large_curvature_lane_keep"], "None"),  # 只有 excluded -> 不匹配
+        # Scene 4: 单标签 (跟停)
         (["brake2stop"], "Scene 4"),
+        # Scene 5: 单标签 (变道)
         (["left_lane_change_effi"], "Scene 5"),
         (["right_lane_change_effi"], "Scene 5"),
+        # 不匹配
         (["error_data"], "None"),
         ([], "None"),
         (["unknown_label"], "None"),
