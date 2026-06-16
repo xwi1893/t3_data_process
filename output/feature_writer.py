@@ -51,7 +51,16 @@ def write_features(
             scene_type = s.get('scene_type', 0)
             scene_en = SCENE_TYPE_NAMES.get(scene_type, f"scene{scene_type}")
 
-            pb_files = s.get('pb_files') or [s.get('pb_file', '')]
+            cloud_path = s.get('cloud_path', '')
+            pb_file_name = s.get('pb_file', '')
+            full_pb_path = os.path.join(cloud_path, pb_file_name) if cloud_path else pb_file_name
+
+            # pb_files 也拼接完整路径
+            raw_pb_files = s.get('pb_files') or [pb_file_name]
+            pb_files = [
+                os.path.join(cloud_path, pf) if cloud_path else pf
+                for pf in raw_pb_files
+            ]
 
             feature_entry = {
                 "driver_id": s.get('driver_id', ''),
@@ -59,7 +68,7 @@ def write_features(
                 "scene_name": scene_en,
                 "sample_id": s.get('sample_id', s.get('segment_id', 0)),
                 "directory_key": s.get('dir_key', ''),
-                "pb_file": s.get('pb_file', ''),
+                "pb_file": full_pb_path,
                 "pb_files": pb_files,
                 "timestamp_ns": s.get('timestamp_ns', 0),
             }

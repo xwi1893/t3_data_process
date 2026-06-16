@@ -188,7 +188,9 @@ def _extract_history_features(frame: dict, fps: int = 10) -> dict:
             lead_dist_list.append(lead_dists[i])
             lead_speed_list.append(lead_speeds[i])
             # 横向位置: ego 轨迹 y 分量
-            lateral_pos_list.append(positions[i][1] if i < len(positions) and len(positions[i]) > 1 else 0.0)
+            lateral_pos_list.append(
+                positions[i][1] if i < len(positions) and len(positions[i]) > 1 else 0.0
+            )
 
     return {
         'time': time_list,
@@ -203,6 +205,15 @@ def _extract_history_features(frame: dict, fps: int = 10) -> dict:
 
 def _extract_future_features(frame: dict, fps: int = 10) -> dict:
     """从最后一帧的未来数据中提取特征
+
+    修复说明:
+        原实现用 future_indices=[history_win+1 .. history_win+future_win]
+        同时索引 agent.pos（全局时间轴）和 ego_traj_pos（局部0起始），
+        导致两个数组时间错位，ax-ex 计算错误，前车距离全部输出 0。
+
+        修复方案：
+        - 将 agent.pos 提前切片为未来部分 agent_pos_future = pos[future_start:]
+        - 两个数组统一使用局部索引 i=[0..n_steps-1]，保证同一时刻对齐
 
     Args:
         frame: 归一化帧数据（最后一帧）
@@ -226,26 +237,29 @@ def _extract_future_features(frame: dict, fps: int = 10) -> dict:
     if n_steps == 0:
         return {}
 
-    # 检测当前帧前车
+    # 找前车
     agents = frame.get('data_agent', [])
     lanelines = frame.get('data_laneline', [])
     ego_yaw = frame.get('data_ego_curr_status', {}).get('yaw', 0.0)
     lead_agent, _, _ = get_lead_vehicle(agents, lanelines, ego_yaw)
     lead_agent_full = _find_lead_agent(agents, lead_agent)
 
-    # 提取前车未来轨迹
-    # agent pos 中未来部分: pos[history_win+1:]
+    # ── 修复核心：把 agent.pos 切成未来切片，与 ego_traj_pos 用同一套局部索引 ──
     history_win = _get_history_win(frame)
-    future_start = history_win + 1
-    future_indices = list(range(future_start, future_start + future_win))
-    ego_future_pos = positions[:n_steps]
+    future_start = history_win + 1  # agent.pos 未来部分的起始全局索引
 
-    lead_dists, lead_speeds = _extract_lead_from_trajectory(
-        ego_future_pos, lead_agent_full, future_indices,
-        masks[:n_steps]
-    )
+    agent_pos_future = []
+    agent_vel_future = []
+    agent_mask_future = []
+    if lead_agent_full is not None:
+        full_pos = lead_agent_full.get('pos', [])
+        full_vel = lead_agent_full.get('velocity', [])
+        full_mask = lead_agent_full.get('valid_mask', [])
+        agent_pos_future = full_pos[future_start: future_start + future_win]
+        agent_vel_future = full_vel[future_start: future_start + future_win] if full_vel else []
+        agent_mask_future = full_mask[future_start: future_start + future_win] if full_mask else []
 
-    # 构建特征序列
+    # 构建特征序列，用局部索引 i 同时索引两个数组
     time_list = []
     speed_list = []
     yaw_list = []
@@ -257,23 +271,49 @@ def _extract_future_features(frame: dict, fps: int = 10) -> dict:
     for i in range(n_steps):
         if i < len(masks) and not masks[i]:
             continue
-        if i < len(lead_dists):
-            # 时间: 正数，表示当前帧之后
-            t = (i + 1) / fps
-            time_list.append(t)
 
-            if i < len(velocities):
-                vx, vy = velocities[i]
-                speed_list.append(np.sqrt(vx ** 2 + vy ** 2))
+        # 自车速度
+        if i < len(velocities):
+            vx, vy = velocities[i]
+            speed_list.append(np.sqrt(vx ** 2 + vy ** 2))
+        else:
+            speed_list.append(0.0)
+
+        yaw_list.append(yaws[i] if i < len(yaws) else 0.0)
+        yaw_rate_list.append(yaw_rates[i] if i < len(yaw_rates) else 0.0)
+        lateral_pos_list.append(
+            positions[i][1] if i < len(positions) and len(positions[i]) > 1 else 0.0
+        )
+        time_list.append((i + 1) / fps)
+
+        # 前车距离：用局部索引 i 同时索引两个切片
+        if (lead_agent_full is not None
+                and i < len(agent_pos_future)
+                and i < len(positions)):
+
+            # agent mask 检查
+            if i < len(agent_mask_future) and not agent_mask_future[i]:
+                lead_dist_list.append(0.0)
+                lead_speed_list.append(0.0)
+                continue
+
+            ax, ay = agent_pos_future[i]  # agent 未来第 i 帧（局部索引）
+            ex, ey = positions[i]         # 自车 未来第 i 帧（局部索引）
+
+            dist = np.sqrt((ax - ex) ** 2 + (ay - ey) ** 2)
+            if ax - ex > 0 and dist < 200:
+                lead_dist_list.append(dist)
+                if i < len(agent_vel_future):
+                    vx, vy = agent_vel_future[i]
+                    lead_speed_list.append(np.sqrt(vx ** 2 + vy ** 2))
+                else:
+                    lead_speed_list.append(0.0)
             else:
-                speed_list.append(0.0)
-
-            yaw_list.append(yaws[i] if i < len(yaws) else 0.0)
-            yaw_rate_list.append(yaw_rates[i] if i < len(yaw_rates) else 0.0)
-            lead_dist_list.append(lead_dists[i])
-            lead_speed_list.append(lead_speeds[i])
-            # 横向位置: ego 轨迹 y 分量
-            lateral_pos_list.append(positions[i][1] if i < len(positions) and len(positions[i]) > 1 else 0.0)
+                lead_dist_list.append(0.0)
+                lead_speed_list.append(0.0)
+        else:
+            lead_dist_list.append(0.0)
+            lead_speed_list.append(0.0)
 
     return {
         'time': time_list,
@@ -293,23 +333,20 @@ def _concat_features(
     fps: int = 10,
 ) -> dict:
     """拼接历史 + 当前 + 未来特征序列
-
+    
     Args:
-        history_feats: 历史帧特征 (可能为空 dict)
+        history_feats: 历史帧特征
         current_feats: 当前片段帧特征
-        future_feats: 未来帧特征 (可能为空 dict)
+        future_feats: 未来帧特征
         fps: 帧率
 
     Returns:
         拼接后的完整特征 dict
     """
-    # 需要拼接的 list 类型字段 (动态特征)
     list_fields = [
         'speed', 'yaw', 'yaw_rate', 'lead_dist', 'lead_speed',
         'lateral_pos', 'lane_width', 'curvature',
     ]
-
-    # 动态特征默认值 (用于历史/未来中缺失的字段)
     defaults = {
         'lateral_pos': 0.0, 'lane_width': 3.5, 'curvature': 0.0,
     }
@@ -328,17 +365,14 @@ def _concat_features(
 
         result[field] = hist_vals + curr_vals + fut_vals
 
-    # 重新计算 time 数组使其连续
     total_len = len(result['speed'])
     n_hist = len(history_feats.get('speed', []))
-    n_curr = len(current_feats.get('speed', []))
 
     time_list = []
     for i in range(total_len):
         time_list.append((i - n_hist) / fps)
     result['time'] = time_list
 
-    # 重新计算 acceleration (拼接后整体差分)
     speed_arr = np.array(result['speed'])
     accel = np.zeros(len(speed_arr))
     if len(speed_arr) > 1:
@@ -348,14 +382,14 @@ def _concat_features(
         accel = np.convolve(accel, kernel, mode='same')
     result['acceleration'] = accel.tolist()
 
-    # 重新平滑 lead_dist (拼接后整体平滑)
     lead_dist_arr = np.array(result['lead_dist'])
-    lead_dist_smooth = smooth_lead_distance(
-        lead_dist_arr, FEATURE_PARAMS.get("smooth_lead_dist_window", 5)
-    )
+    smooth_window = FEATURE_PARAMS.get("smooth_lead_dist_window", 5)
+    if len(lead_dist_arr) >= smooth_window:
+        lead_dist_smooth = smooth_lead_distance(lead_dist_arr, smooth_window)
+    else:
+        lead_dist_smooth = lead_dist_arr.copy()
     result['lead_dist'] = lead_dist_smooth.tolist()
 
-    # 重新计算时距
     time_headway = np.full(len(speed_arr), 15.0)
     valid_speed = speed_arr > 0.1
     time_headway[valid_speed] = np.minimum(
@@ -363,7 +397,11 @@ def _concat_features(
     )
     result['time_headway'] = time_headway.tolist()
 
-    result['frame_count'] = current_feats.get('frame_count', 0) + n_hist + len(future_feats.get('speed', []))
+    result['frame_count'] = (
+        current_feats.get('frame_count', 0)
+        + n_hist
+        + len(future_feats.get('speed', []))
+    )
 
     return result
 
@@ -423,26 +461,16 @@ def extract_segment_features(
         yaw = ego.get('yaw', 0.0)
         yr = ego.get('yaw_rate', 0.0)
 
-        # 前车检测
         lead_agent, lead_dist, lead_spd = get_lead_vehicle(agents, lanelines, yaw)
-
-        # 横向位置
         lat_pos, curv = calculate_lateral_position(lanelines)
-
-        # 车道宽度
         _, _, lw = get_lane_boundaries(lanelines)
-
-        # 路口检测
         has_sl = check_has_stopline(frame)
         has_tl = check_has_traffic_light(frame)
         is_intersection = has_sl or has_tl
 
-        # 转弯检测
         yaw_rate_thresh = 0.1
         curv_thresh = 0.08
         is_turn = abs(yr) > yaw_rate_thresh or abs(curv) > curv_thresh
-
-        # U-turn 检测 (简化: 航向角大幅变化)
         is_uturn = False
 
         t_sec = i / fps if base_time is None else (i / fps)
@@ -453,7 +481,7 @@ def extract_segment_features(
         speed_list.append(v)
         yaw_rate_list.append(yr)
         yaw_list.append(yaw)
-        lead_dist_list.append(lead_dist if lead_agent is not None else 0.0)
+        lead_dist_list.append(float(lead_dist) if lead_agent is not None else 0.0)
         lead_speed_list.append(lead_spd)
         lateral_pos_list.append(lat_pos)
         lane_width_list.append(lw if lw > 0 else 3.5)
@@ -467,29 +495,25 @@ def extract_segment_features(
     speed_arr = np.array(speed_list)
     lead_dist_arr = np.array(lead_dist_list)
 
-    # 平滑前车距离
-    lead_dist_smooth = smooth_lead_distance(
-        lead_dist_arr, FEATURE_PARAMS.get("smooth_lead_dist_window", 5)
-    )
+    smooth_window = FEATURE_PARAMS.get("smooth_lead_dist_window", 5)
+    if len(lead_dist_arr) >= smooth_window:
+        lead_dist_smooth = smooth_lead_distance(lead_dist_arr, smooth_window)
+    else:
+        lead_dist_smooth = lead_dist_arr.copy()
 
-    # 计算加速度
     accel = np.zeros(len(speed_arr))
     if len(speed_arr) > 1:
         accel[1:] = np.diff(speed_arr) * fps
-    # 平滑加速度
     if len(accel) >= 3:
         kernel = np.ones(3) / 3
         accel = np.convolve(accel, kernel, mode='same')
 
-    # 时距
     time_headway = np.full(len(speed_arr), 15.0)
     valid_speed = speed_arr > 0.1
     time_headway[valid_speed] = np.minimum(
         lead_dist_smooth[valid_speed] / speed_arr[valid_speed], 15.0
     )
 
-    # === 时域窗口扩展 ===
-    # 当前片段特征已提取完毕，存入 current_feats
     current_feats = {
         'speed': speed_list,
         'lead_dist': lead_dist_smooth.tolist(),
@@ -511,7 +535,41 @@ def extract_segment_features(
     history_feats = {}
     future_feats = {}
 
-    # 历史数据前补 (从第一帧)
+    # ── 修复：在截断之前，先从完整轨迹算出 lateral_range_full ──
+    # 背景：截断后的历史/未来各只保留30帧，恰好都落在变道的中间段，
+    #       导致 max - min 被严重低估（0.82m < 1.0m 阈值），变道被误判为不足。
+    # 方案：截断前先从完整轨迹提取所有有效 y 值，算出真实横向跨度，
+    #       存入 result['lateral_range_full']，供 confirm_lane_change 优先使用。
+    lateral_range_full = None
+
+    if valid_frames:
+        # 历史完整 y（截断前，来自第一帧的 label_ego_hist_traj）
+        first_frame = valid_frames[0][1]
+        hist_traj_full = first_frame.get('label_ego_hist_traj', {})
+        hist_pos_full  = hist_traj_full.get('pos', [])
+        hist_mask_full = hist_traj_full.get('mask', [])
+        hist_y_full = [
+            hist_pos_full[i][1]
+            for i in range(min(len(hist_pos_full), len(hist_mask_full)))
+            if hist_mask_full[i] and len(hist_pos_full[i]) > 1
+        ]
+
+        # 未来完整 y（截断前，来自最后一帧的 label_ego_traj）
+        last_frame = valid_frames[-1][1]
+        fut_traj_full = last_frame.get('label_ego_traj', {})
+        fut_pos_full  = fut_traj_full.get('pos', [])
+        fut_mask_full = fut_traj_full.get('mask', [])
+        fut_y_full = [
+            fut_pos_full[i][1]
+            for i in range(min(len(fut_pos_full), len(fut_mask_full)))
+            if fut_mask_full[i] and len(fut_pos_full[i]) > 1
+        ]
+
+        # 当前片段帧的 lateral_pos（已经算好了）
+        all_y_full = hist_y_full + lateral_pos_list + fut_y_full
+        if len(all_y_full) >= 2:
+            lateral_range_full = float(max(all_y_full) - min(all_y_full))
+
     if ext_cfg.get("use_history", False) and valid_frames:
         first_frame = valid_frames[0][1]
         history_feats = _extract_history_features(first_frame, fps)
@@ -521,7 +579,6 @@ def extract_segment_features(
                 if isinstance(v, list):
                     history_feats[k] = v[-max_hist:]
 
-    # 未来数据后补 (从最后一帧)
     if ext_cfg.get("use_future", False) and valid_frames:
         last_frame = valid_frames[-1][1]
         future_feats = _extract_future_features(last_frame, fps)
@@ -531,40 +588,25 @@ def extract_segment_features(
                 if isinstance(v, list):
                     future_feats[k] = v[:max_fut]
 
-    # 拼接: history + current + future
     result = _concat_features(history_feats, current_feats, future_feats, fps)
 
-    # list → numpy
     for key in list(result.keys()):
         if isinstance(result[key], list):
             result[key] = np.array(result[key])
 
-    # 补齐字段 (供 scene_extractors / general_features 使用)
+    # 将完整轨迹的 lateral_range 存入 result，供 confirm_lane_change 优先使用
+    if lateral_range_full is not None:
+        result['lateral_range_full'] = lateral_range_full
+
     result['time_sec'] = result['time']
     result['lateral_acc'] = result['speed'] * result['yaw_rate']
     result['fps'] = 10.0
 
-    # 静态特征: 直接从当前帧取标量值
-    if current_feats.get('is_at_intersection'):
-        result['is_at_intersection'] = current_feats['is_at_intersection'][0]
-    else:
-        result['is_at_intersection'] = False
-    if current_feats.get('has_stopline'):
-        result['has_stopline'] = current_feats['has_stopline'][0]
-    else:
-        result['has_stopline'] = False
-    if current_feats.get('has_traffic_light'):
-        result['has_traffic_light'] = current_feats['has_traffic_light'][0]
-    else:
-        result['has_traffic_light'] = False
-    if current_feats.get('is_turning'):
-        result['is_turning'] = current_feats['is_turning'][0]
-    else:
-        result['is_turning'] = False
-    if current_feats.get('is_u_turn'):
-        result['is_u_turn'] = current_feats['is_u_turn'][0]
-    else:
-        result['is_u_turn'] = False
+    result['is_at_intersection'] = current_feats['is_at_intersection'][0] if current_feats.get('is_at_intersection') else False
+    result['has_stopline'] = current_feats['has_stopline'][0] if current_feats.get('has_stopline') else False
+    result['has_traffic_light'] = current_feats['has_traffic_light'][0] if current_feats.get('has_traffic_light') else False
+    result['is_turning'] = current_feats['is_turning'][0] if current_feats.get('is_turning') else False
+    result['is_u_turn'] = current_feats['is_u_turn'][0] if current_feats.get('is_u_turn') else False
 
     return result
 
@@ -595,7 +637,6 @@ def confirm_following_stop(
     if len(speed) < 3:
         return {"confirmed": False, "reason": "帧数不足"}
 
-    # 检查是否有减速到停车
     stop_speed = 0.1
     has_stop = np.any(speed < stop_speed)
     min_start_speed = 3.0
@@ -604,7 +645,6 @@ def confirm_following_stop(
     if not has_stop or not has_decel:
         return {"confirmed": False, "reason": "无有效减速停车过程"}
 
-    # 前车存在比例
     valid_lead = lead_dist > 0
     lead_ratio = np.sum(valid_lead) / len(lead_dist) if len(lead_dist) > 0 else 0
 
@@ -615,7 +655,6 @@ def confirm_following_stop(
             "metrics": {"lead_ratio": float(lead_ratio)},
         }
 
-    # 平均前车距离
     valid_dists = lead_dist[valid_lead]
     avg_lead_dist = float(np.mean(valid_dists)) if len(valid_dists) > 0 else float('inf')
 
@@ -670,7 +709,6 @@ def confirm_intersection_stop(
             "metrics": {"is_at_intersection": False},
         }
 
-    # 检查停车
     stop_mask = speed < 0.1
     if not np.any(stop_mask):
         return {"confirmed": False, "reason": "无停车阶段"}
@@ -733,15 +771,12 @@ def confirm_empty_start(
     if not np.any(static_mask):
         return {"confirmed": False, "reason": "无静止阶段"}
 
-    # 检查加速
     has_accel = np.any(acceleration > config["accelerate_thresh"])
     if not has_accel:
         return {"confirmed": False, "reason": "无有效加速"}
 
-    # 检查前车距离
     valid_lead = lead_dist > 0
     if np.sum(valid_lead) == 0:
-        # 完全无前车
         return {
             "confirmed": True,
             "reason": "起步确认通过 (无前车)",
@@ -790,7 +825,6 @@ def confirm_following_vehicle(
     if len(speed) < 3:
         return {"confirmed": False, "reason": "帧数不足"}
 
-    # --- 前车存在性检查 ---
     valid_lead = lead_dist > 0
     lead_ratio = np.sum(valid_lead) / len(lead_dist) if len(lead_dist) > 0 else 0
 
@@ -813,14 +847,12 @@ def confirm_following_vehicle(
 
     fps = len(time_arr) / (time_arr[-1] - time_arr[0]) if len(time_arr) > 1 else 10
 
-    # 有效跟车帧
     valid_mask = (
         (time_headway > config["headway_min"]) &
         (time_headway < config["headway_max"]) &
         (speed > config["speed_thresh"])
     )
 
-    # 找最长连续有效段
     max_consecutive = 0
     current_consecutive = 0
     best_start = 0
@@ -852,7 +884,6 @@ def confirm_following_vehicle(
             "metrics": {"max_duration": duration},
         }
 
-    # 时距波动
     thw_segment = time_headway[best_start:best_end + 1]
     fluct = float(np.max(thw_segment) - np.min(thw_segment))
     if fluct > config["headway_fluct_thresh"]:
@@ -903,14 +934,6 @@ def confirm_lane_change(
     if len(yaw_rate) < 3:
         return {"confirmed": False, "reason": "帧数不足"}
 
-    # # 路口判断 (静态特征, 直接用当前帧布尔值)
-    # if is_at_intersection:
-    #     return {
-    #         "confirmed": False,
-    #         "reason": "路口区域内，不适用变道检测",
-    #         "metrics": {"is_at_intersection": True},
-    #     }
-
     # 横摆角速度检查
     abs_yaw_rate = np.abs(yaw_rate)
     avg_yaw = float(np.mean(abs_yaw_rate))
@@ -930,7 +953,7 @@ def confirm_lane_change(
             "metrics": {"avg_yaw_rate": avg_yaw, "max_yaw_rate": max_yaw},
         }
 
-# 曲率检查
+    # 曲率检查  
     abs_curv = np.abs(curvature)
     avg_curv = float(np.mean(abs_curv))
     if avg_curv > config.get("max_avg_curvature", 0.08):
@@ -940,16 +963,23 @@ def confirm_lane_change(
             "metrics": {"avg_curvature": avg_curv},
         }
 
-    # 横向位置变化检查 (变道应有明显横向位移) TODO: 出错，坐标系会随自车变化
-    lateral_range = float(np.max(lateral_pos) - np.min(lateral_pos))
-    if lateral_range < 1.0:
+    # ── 修复：优先使用截断前完整轨迹算出的 lateral_range_full ──
+    # 原因：截断后的 lateral_pos 只保留了30帧，恰好落在变道中间段，
+    #       max - min 会被严重低估，导致合法变道被误判为"横向位移不足"。
+    # 降级策略：若 lateral_range_full 不存在（旧数据或未启用窗口扩展），
+    #           则回退到截断后的 max - min，保持向后兼容。
+    if 'lateral_range_full' in features:
+        lateral_range = float(features['lateral_range_full'])
+    else:
+        lateral_range = float(np.max(lateral_pos) - np.min(lateral_pos))
+
+    if lateral_range < config.get("min_lateral_range", 1.0):
         return {
             "confirmed": False,
             "reason": f"横向位移不足: {lateral_range:.2f}m",
             "metrics": {"lateral_range": lateral_range},
         }
 
-    # 前车检查
     valid_lead = lead_dist[(lead_dist > 0) & (lead_dist < 50)]
     lead_ratio = len(valid_lead) / len(lead_dist) if len(lead_dist) > 0 else 0
 
