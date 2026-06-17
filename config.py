@@ -65,18 +65,17 @@ COMPLIANCE_PARAMS = {
 SAMPLE_PARAMS = {
     "k_frames_default": 3,             # 未单独配置的场景使用此默认值
     "k_frames_per_scene": {
-        1: 8,  # 路口停车
-        2: 8,  # 起步
-        3: 8,  # 跟车
-        4: 4,  # 跟停
-        5: 2,  # 变道
+        1: 6,  # 路口停车
+        2: 6,  # 起步
+        3: 6,  # 跟车
+        4: 6,  # 跟停
+        5: 3,  # 变道
     },
 }
 
 # === 片段合并参数 ===
 MERGE_PARAMS = {
     "max_gap_seconds": 0.5,            # 允许的最大帧间隔(秒), 约5帧
-    "min_segment_duration": 1.0,       # 最短片段时长(秒)
     "fps": 10,                         # 帧率
     "frame_interval_ns": 100_000_000,  # ~0.1s = 100ms (纳秒)
 }

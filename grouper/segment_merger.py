@@ -17,17 +17,14 @@ from config import MERGE_PARAMS, SAMPLE_PARAMS
 def identify_continuous_runs(
     frames: List[dict],
     max_gap_seconds: float = MERGE_PARAMS["max_gap_seconds"],
-    min_segment_duration: float = MERGE_PARAMS["min_segment_duration"],
 ) -> List[List[dict]]:
     """识别连续场景片段（不合并，只分段）
 
     连续性判断: 相邻帧时间戳差 <= max_gap_seconds (转换为纳秒)
-    过滤: 时长 < min_segment_duration 的片段直接丢弃
 
     Args:
         frames: 同一 (driver_id, scene_type) 的帧列表，已按时间排序
         max_gap_seconds: 最大允许帧间隔(秒)
-        min_segment_duration: 最短片段时长(秒)
 
     Returns:
         连续帧列表的列表 [[f0, f1, ...], [f5, f6, ...], ...]
@@ -36,7 +33,6 @@ def identify_continuous_runs(
         return []
 
     max_gap_ns = int(max_gap_seconds * 1e9)
-    min_duration_ns = int(min_segment_duration * 1e9)
 
     runs = []
     current_run = [frames[0]]
@@ -54,14 +50,7 @@ def identify_continuous_runs(
     if current_run:
         runs.append(current_run)
 
-    # 过滤过短的片段
-    result = []
-    for run in runs:
-        duration_ns = run[-1]['timestamp_ns'] - run[0]['timestamp_ns']
-        if duration_ns >= min_duration_ns:
-            result.append(run)
-
-    return result
+    return runs
 
 
 def sample_k_frames(
