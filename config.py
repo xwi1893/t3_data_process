@@ -54,7 +54,7 @@ COMPLIANCE_PARAMS = {
     "headway_max": 15.0,               # 秒, 时距上限
     "ttc_max": 10.0,                   # 秒, TTC 上限
     "min_following_distance": 5.0,      # 米, 最小跟停距离
-    "min_lead_ratio": 0.6,             # 前车存在比例下限
+    "min_lead_ratio": 0.5,             # 前车存在比例下限
     "avg_lead_dist_max": 50.0,         # 米, 平均前车距离上限
     "stopline_distance_threshold": 50.0,  # 米, 停止线检测距离
 }
@@ -100,12 +100,12 @@ DETECTION_PARAMS = {
         "headway_fluct_thresh": 1.0,
         "min_follow_duration": 3.0,
         "max_lead_distance": 50.0,
-        "min_lead_ratio": 0.6,
+        "min_lead_ratio": 0.5,
     },
     "following_stop": {
         "max_lead_distance": 50.0,
         "min_lead_distance": 5.0,
-        "min_lead_ratio": 0.6,
+        "min_lead_ratio": 0.5,
     },
     "lane_change": {
         "yaw_rate_threshold": 0.1,
