@@ -627,7 +627,7 @@ def confirm_following_stop(
 
     检查:
     1. 存在减速到停车的过程
-    2. 前车存在比例 >= 60%
+    2. 前车存在比例 >= min_lead_ratio
     3. 平均前车距离 < 50m
     """
     speed = np.array(features["speed"])
@@ -811,7 +811,7 @@ def confirm_following_vehicle(
     移植自参考项目 tiqvtest.py detect_following_vehicle()
 
     检查:
-    1. 前车存在比例 >= 60% 且平均前车距离 <= 50m
+    1. 前车存在比例 >= min_lead_ratio 且平均前车距离 <= 50m
     2. 速度 >= 5 m/s
     3. 时距在 [0, 15] 秒内
     4. 持续 >= 3 秒

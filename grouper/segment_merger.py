@@ -66,7 +66,7 @@ def identify_continuous_runs(
 
 def sample_k_frames(
     run: List[dict],
-    k: int = SAMPLE_PARAMS["k_frames"],
+    k: int = SAMPLE_PARAMS["k_frames_default"],
 ) -> List[dict]:
     """从连续片段中均匀采样 k 帧
 
@@ -109,23 +109,29 @@ def sample_k_frames(
     return samples
 
 
+def _get_k_for_scene(scene_type: int) -> int:
+    """根据场景类型获取对应的采样帧数 k"""
+    per_scene = SAMPLE_PARAMS.get("k_frames_per_scene", {})
+    return per_scene.get(scene_type, SAMPLE_PARAMS["k_frames_default"])
+
+
 def group_and_sample(
     frame_scene: dict,
     dir_key: str,
     driver_reverse_index: dict,
     date_split: dict,
-    k_frames: int = SAMPLE_PARAMS["k_frames"],
 ) -> List[dict]:
     """完整的分组 + 连续片段识别 + k 帧采样
 
-    对单个目录执行: 分组 → 识别连续片段 → 均匀采样 k 帧
+    对单个目录执行: 分组 → 识别连续片段 → 按场景类型均匀采样 k 帧
+    k 值由 config.SAMPLE_PARAMS["k_frames_per_scene"] 按场景类型决定，
+    未配置的场景使用 SAMPLE_PARAMS["k_frames_default"]
 
     Args:
         frame_scene: {pb_filename: [labels]}
         dir_key: 目录key
         driver_reverse_index: 反向索引
         date_split: 目录key到云端路径
-        k_frames: 每个连续片段采样的帧数
 
     Returns:
         所有采样条目列表
@@ -138,10 +144,11 @@ def group_and_sample(
 
     all_samples = []
     for (driver_id, scene_type), frames in groups.items():
+        k = _get_k_for_scene(scene_type)
         runs = identify_continuous_runs(frames)
 
         for run in runs:
-            samples = sample_k_frames(run, k=k_frames)
+            samples = sample_k_frames(run, k=k)
             all_samples.extend(samples)
 
     # 分配 sample_id
@@ -154,9 +161,10 @@ def group_and_sample(
         st = s['scene_type']
         type_counts[st] = type_counts.get(st, 0) + 1
 
-    print(f"[sampler] {dir_key}: 共 {len(all_samples)} 个采样条目 (k={k_frames})")
+    print(f"[sampler] {dir_key}: 共 {len(all_samples)} 个采样条目")
     for st, count in sorted(type_counts.items()):
-        print(f"  Scene {st} ({scene_names.get(st, '?')}): {count} 个")
+        k_used = _get_k_for_scene(st)
+        print(f"  Scene {st} ({scene_names.get(st, '?')}): {count} 个 (k={k_used})")
 
     return all_samples
 
