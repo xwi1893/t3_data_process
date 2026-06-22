@@ -30,17 +30,19 @@ def _phase_means(arr: np.ndarray, n_phases: int = 5) -> list:
 
 
 # ============================================================
-# Scene 1: 路口停车 (17个特征)
+# Scene 1: 路口停车 (6个特征)
 # ============================================================
 
 def extract_scene1_features(features: dict) -> dict:
     """路口停车特征: 减速过程分析
 
-    移植自参考项目 extract_scene1_features()
+    输出特征 (6个):
+    - scene1_stop_avg_deceleration: 停车平均减速度
+    - scene1_stop_decel_phase2~5: 停车第2~5阶段减速度
+    - scene1_stop_max_deceleration: 停车最大减速度
     """
     speed = features["speed"]
     acceleration = features["acceleration"]
-    time_sec = features["time_sec"]
 
     if len(speed) < 5:
         return {"error": "帧数不足"}
@@ -65,56 +67,38 @@ def extract_scene1_features(features: dict) -> dict:
     if end_idx - start_idx < 5:
         return {"error": "减速过程过短"}
 
-    # 减速阶段切片
-    decel_speed = speed[start_idx:end_idx + 1]
     decel_accel = acceleration[start_idx:end_idx + 1]
-    decel_time = time_sec[end_idx] - time_sec[start_idx]
 
-    # 5阶段特征
-    speed_phases = _phase_means(decel_speed)
+    # 5阶段减速度均值 (只取 phase2~5)
     accel_phases = _phase_means(decel_accel)
 
-    avg_accel = float(np.mean(decel_accel))
-    max_accel = float(np.min(decel_accel))  # 最负 = 最大减速
+    avg_decel = float(np.mean(decel_accel))
+    max_decel = float(np.min(decel_accel))  # 最负 = 最大减速
 
     return {
-        "decel_time": round(decel_time, 2),
-        "avg_acceleration": round(avg_accel, 2),
-        "max_deceleration": round(max_accel, 2),
-        "accel_std": round(float(np.std(decel_accel)), 2),
-        "speed_phase1": speed_phases[0],
-        "speed_phase2": speed_phases[1],
-        "speed_phase3": speed_phases[2],
-        "speed_phase4": speed_phases[3],
-        "speed_phase5": speed_phases[4],
-        "accel_phase1": accel_phases[0],
-        "accel_phase2": accel_phases[1],
-        "accel_phase3": accel_phases[2],
-        "accel_phase4": accel_phases[3],
-        "accel_phase5": accel_phases[4],
-        "accel_efficiency": round(
-            avg_accel / max_accel if max_accel != 0 else 0, 2
-        ),
-        "speed_ratio_at_midpoint": round(
-            float(decel_speed[len(decel_speed) // 2]) / start_speed
-            if start_speed > 0 else 0, 2
-        ),
-        "start_speed": round(float(start_speed), 2),
+        "scene1_stop_avg_deceleration": round(avg_decel, 2),
+        "scene1_stop_decel_phase2": accel_phases[1],
+        "scene1_stop_decel_phase3": accel_phases[2],
+        "scene1_stop_decel_phase4": accel_phases[3],
+        "scene1_stop_decel_phase5": accel_phases[4],
+        "scene1_stop_max_deceleration": round(max_decel, 2),
     }
 
 
 # ============================================================
-# Scene 2: 起步 (16个特征)
+# Scene 2: 空旷起步 (6个特征)
 # ============================================================
 
 def extract_scene2_features(features: dict) -> dict:
     """起步特征: 加速过程分析
 
-    移植自参考项目 extract_scene2_features()
+    输出特征 (6个):
+    - scene2_empty_start_acceleration_phase1/2/4/5: 起步各阶段加速度
+    - scene2_empty_start_peak_acceleration: 空旷起步峰值加速度
+    - scene2_empty_start_speed_phase1: 起步第1阶段/早期速度
     """
     speed = features["speed"]
     acceleration = features["acceleration"]
-    time_sec = features["time_sec"]
 
     if len(speed) < 5:
         return {"error": "帧数不足"}
@@ -137,51 +121,39 @@ def extract_scene2_features(features: dict) -> dict:
     if end_idx - start_idx < 3:
         return {"error": "加速过程过短"}
 
-    accel_speed = speed[start_idx:end_idx + 1]
     accel_accel = acceleration[start_idx:end_idx + 1]
-    accel_time = time_sec[end_idx] - time_sec[start_idx]
+    accel_speed = speed[start_idx:end_idx + 1]
 
-    speed_phases = _phase_means(accel_speed)
     accel_phases = _phase_means(accel_accel)
+    speed_phases = _phase_means(accel_speed)
 
-    avg_accel = float(np.mean(accel_accel))
     peak_accel = float(np.max(accel_accel))
 
     return {
-        "time_to_80pct_max": round(accel_time, 2),
-        "avg_acceleration": round(avg_accel, 2),
-        "peak_acceleration": round(peak_accel, 2),
-        "acceleration_std": round(float(np.std(accel_accel)), 2),
-        "speed_phase1": speed_phases[0],
-        "speed_phase2": speed_phases[1],
-        "speed_phase3": speed_phases[2],
-        "speed_phase4": speed_phases[3],
-        "speed_phase5": speed_phases[4],
-        "accel_phase1": accel_phases[0],
-        "accel_phase2": accel_phases[1],
-        "accel_phase3": accel_phases[2],
-        "accel_phase4": accel_phases[3],
-        "accel_phase5": accel_phases[4],
-        "acceleration_efficiency": round(
-            avg_accel / peak_accel if peak_accel != 0 else 0, 2
-        ),
-        "max_speed": round(max_speed, 2),
+        "scene2_empty_start_acceleration_phase1": accel_phases[0],
+        "scene2_empty_start_acceleration_phase2": accel_phases[1],
+        "scene2_empty_start_acceleration_phase4": accel_phases[3],
+        "scene2_empty_start_acceleration_phase5": accel_phases[4],
+        "scene2_empty_start_peak_acceleration": round(peak_accel, 2),
+        "scene2_empty_start_speed_phase1": speed_phases[0],
     }
 
 
 # ============================================================
-# Scene 3: 跟车 (20个特征)
+# Scene 3: 跟车 (8个特征)
 # ============================================================
 
 def extract_scene3_features(features: dict) -> dict:
-    """跟车特征: TTC, THW, 相对速度
+    """跟车特征: 前车距离分阶段 + TTC标准差
 
-    移植自参考项目 extract_scene3_features()
+    输出特征 (8个):
+    - scene3_following_avg_lead_dist: 跟车平均前车距离
+    - scene3_following_lead_dist_phase1~5: 跟车各阶段前车距离
+    - scene3_following_ttc_std: 跟车TTC标准差
     """
     speed = features["speed"]
     lead_dist = features["lead_dist"]
     lead_speed = features["lead_speed"]
-    time_headway = features["time_headway"]
 
     if len(speed) < 3:
         return {"error": "帧数不足"}
@@ -197,55 +169,38 @@ def extract_scene3_features(features: dict) -> dict:
 
     valid_ttc = ttc[~np.isnan(ttc)]
 
-    # 基本统计
+    # 平均前车距离
     valid_lead = lead_dist[lead_dist > 0]
+    avg_lead_dist = round(float(np.mean(valid_lead)), 2) if len(valid_lead) > 0 else 0
 
-    result = {
-        "avg_lead_dist": round(float(np.mean(valid_lead)), 2) if len(valid_lead) > 0 else 0,
-        "lead_dist_var": round(float(np.var(valid_lead)), 2) if len(valid_lead) > 0 else 0,
-        "min_lead_dist": round(float(np.min(valid_lead)), 2) if len(valid_lead) > 0 else 0,
-        "avg_thw": round(float(np.mean(time_headway)), 2),
-        "min_thw": round(float(np.min(time_headway)), 2),
-        "thw_5th": round(float(np.percentile(time_headway, 5)), 2),
+    # 5阶段前车距离
+    lead_dist_phases = _phase_means(lead_dist)
+
+    # TTC 标准差
+    ttc_std = round(float(np.std(valid_ttc)), 2) if len(valid_ttc) > 0 else 0
+
+    return {
+        "scene3_following_avg_lead_dist": avg_lead_dist,
+        "scene3_following_lead_dist_phase1": lead_dist_phases[0],
+        "scene3_following_lead_dist_phase2": lead_dist_phases[1],
+        "scene3_following_lead_dist_phase3": lead_dist_phases[2],
+        "scene3_following_lead_dist_phase4": lead_dist_phases[3],
+        "scene3_following_lead_dist_phase5": lead_dist_phases[4],
+        "scene3_following_ttc_std": ttc_std,
     }
-
-    # TTC 特征
-    if len(valid_ttc) > 0:
-        result.update({
-            "ttc_5th": round(float(np.percentile(valid_ttc, 5)), 2),
-            "ttc_mean": round(float(np.mean(valid_ttc)), 2),
-            "ttc_std": round(float(np.std(valid_ttc)), 2),
-            "ttc_valid_ratio": round(len(valid_ttc) / len(ttc), 2),
-        })
-    else:
-        result.update({
-            "ttc_5th": None, "ttc_mean": None,
-            "ttc_std": None, "ttc_valid_ratio": 0.0,
-        })
-
-    # 相对速度
-    result.update({
-        "relative_speed_mean": round(float(np.mean(relative_speed)), 2),
-        "relative_speed_std": round(float(np.std(relative_speed)), 2),
-        "relative_speed_max": round(float(np.max(relative_speed)), 2),
-        "relative_speed_min": round(float(np.min(relative_speed)), 2),
-    })
-
-    # 5阶段
-    result["relative_speed_phases"] = _phase_means(relative_speed)
-    result["lead_dist_phases"] = _phase_means(lead_dist)
-
-    return result
 
 
 # ============================================================
-# Scene 4: 跟停 (19个特征)
+# Scene 4: 跟停 (8个特征)
 # ============================================================
 
 def extract_scene4_features(features: dict) -> dict:
-    """跟停特征: 增强版 TTC + 前车距离
+    """跟停特征: 前车距离分阶段 + THW/TTC标准差
 
-    移植自参考项目 extract_scene4_features()
+    输出特征 (8个):
+    - scene4_following_stop_lead_dist_phase1~5: 跟停各阶段前车距离
+    - scene4_following_stop_thw_std: 跟停THW标准差
+    - scene4_following_stop_ttc_std: 跟停TTC标准差
     """
     speed = features["speed"]
     lead_dist = features["lead_dist"]
@@ -255,114 +210,117 @@ def extract_scene4_features(features: dict) -> dict:
     if len(speed) < 3:
         return {"error": "帧数不足"}
 
-    # 静止阶段分析
-    static_mask = speed < 0.1
-    static_lead = lead_dist[static_mask]
-    min_static_dist = float(np.min(static_lead[static_lead > 0])) if np.any(static_lead > 0) else 0
-
-    # THW 增强
+    # THW 标准差
     valid_thw = time_headway[time_headway < 15]
+    thw_std = round(float(np.std(valid_thw)), 2) if len(valid_thw) > 0 else 0
 
-    result = {
-        "avg_lead_dist": round(float(np.mean(lead_dist[lead_dist > 0])), 2)
-            if np.any(lead_dist > 0) else 0,
-        "min_static_dist": round(min_static_dist, 2),
-        "avg_thw": round(float(np.mean(valid_thw)), 2) if len(valid_thw) > 0 else 15.0,
-        "min_thw": round(float(np.min(valid_thw)), 2) if len(valid_thw) > 0 else 15.0,
-        "thw_5th": round(float(np.percentile(valid_thw, 5)), 2) if len(valid_thw) > 0 else 15.0,
-        "thw_95th": round(float(np.percentile(valid_thw, 95)), 2) if len(valid_thw) > 0 else 15.0,
-        "thw_std": round(float(np.std(valid_thw)), 2) if len(valid_thw) > 0 else 0,
-    }
-
-    # TTC (截断到 10s)
+    # TTC 标准差 (截断到 10s)
     relative_speed = speed - lead_speed
     valid_ttc_mask = (relative_speed > 0) & (lead_dist > 0)
     ttc = np.full(len(speed), np.nan)
     ttc[valid_ttc_mask] = lead_dist[valid_ttc_mask] / relative_speed[valid_ttc_mask]
     ttc[ttc > 10] = np.nan
     valid_ttc = ttc[~np.isnan(ttc)]
-
-    if len(valid_ttc) > 0:
-        result.update({
-            "ttc_5th": round(float(np.percentile(valid_ttc, 5)), 2),
-            "ttc_95th": round(float(np.percentile(valid_ttc, 95)), 2),
-            "ttc_std": round(float(np.std(valid_ttc)), 2),
-            "ttc_mean": round(float(np.mean(valid_ttc)), 2),
-            "ttc_valid_ratio": round(len(valid_ttc) / len(ttc), 2),
-        })
-    else:
-        result.update({
-            "ttc_5th": None, "ttc_95th": None, "ttc_std": None,
-            "ttc_mean": None, "ttc_valid_ratio": 0.0,
-        })
-
-    # 前车距离增强
-    valid_lead = lead_dist[lead_dist > 0]
-    result["lead_dist_max"] = round(float(np.max(valid_lead)), 2) if len(valid_lead) > 0 else 0
-    result["lead_dist_std"] = round(float(np.std(valid_lead)), 2) if len(valid_lead) > 0 else 0
+    ttc_std = round(float(np.std(valid_ttc)), 2) if len(valid_ttc) > 0 else 0
 
     # 5阶段前车距离
-    result["lead_dist_phases"] = _phase_means(lead_dist)
+    lead_dist_phases = _phase_means(lead_dist)
 
-    return result
+    return {
+        "scene4_following_stop_lead_dist_phase1": lead_dist_phases[0],
+        "scene4_following_stop_lead_dist_phase2": lead_dist_phases[1],
+        "scene4_following_stop_lead_dist_phase3": lead_dist_phases[2],
+        "scene4_following_stop_lead_dist_phase4": lead_dist_phases[3],
+        "scene4_following_stop_lead_dist_phase5": lead_dist_phases[4],
+        "scene4_following_stop_thw_std": thw_std,
+        "scene4_following_stop_ttc_std": ttc_std,
+    }
 
 
 # ============================================================
-# Scene 5: 变道 (简化版, 核心特征)
+# Scene 5: 变道 (7个特征)
 # ============================================================
 
 def extract_scene5_features(features: dict) -> dict:
-    """变道特征: 参考帧变化 + 车道距离
+    """变道特征: 变道前后前车距离 + 目标车道后车距离
 
-    简化版移植自参考项目 extract_scene5_features()
-    完整版需要 extract_lane_vehicles_for_frame (待后续补充)
+    变道时刻检测：使用横向位置(lateral_pos)的变化率峰值来定位，
+    而非前车距离跳变——前车距离跳变可能由传感器噪声或前车驶离引起，
+    不能可靠表征变道时刻。
+
+    前车区分：
+    - lead_dist: 当前车道前车距离（变道后自动切换为新车道前车）
+    - origin_lead_dist: 原车道前车距离（始终追踪变道前的那辆前车）
+
+    输出特征 (7个):
+    - scene5_lane_change_before_lead_dist_mean: 变道前本车道前车平均距离
+    - scene5_lane_change_before_lead_dist_min: 变道前本车道前车最小距离
+    - scene5_lane_change_after_lead_dist_mean: 变道后前车平均距离（新车道前车）
+    - scene5_lane_change_after_origin_front_mean: 变道后原车道前车距离均值
+    - scene5_lane_change_min_lead_dist_during_lc: 变道过程中最小前车距离
+    - scene5_lane_change_lc_target_rear_phase2: 变道第2阶段目标车道后车距离
+    - scene5_lane_change_lc_target_rear_phase5: 变道第5阶段/末段目标车道后车距离
     """
     speed = features["speed"]
     lead_dist = features["lead_dist"]
     lateral_pos = features["lateral_pos"]
-    time_sec = features["time_sec"]
+    origin_lead_dist = features.get("origin_lead_dist", lead_dist)
 
-    if len(speed) < 5:
+    n = len(speed)
+    if n < 5:
         return {"error": "帧数不足"}
 
-    # 参考帧变化检测 (lead_dist 跳变 > 10m)
-    ref_frame_idx = len(lead_dist) // 2
-    for i in range(1, len(lead_dist)):
-        if abs(lead_dist[i] - lead_dist[i - 1]) > 10:
-            ref_frame_idx = i
-            break
+    # ── 变道时刻检测：横向位置变化率峰值 ──
+    # 计算横向位置的差分（近似横向速度），取绝对值最大的帧作为变道中点
+    if len(lateral_pos) >= 3:
+        lat_diff = np.abs(np.diff(lateral_pos))
+        # 平滑差分以抑制噪声
+        if len(lat_diff) >= 3:
+            kernel = np.ones(3) / 3
+            lat_diff = np.convolve(lat_diff, kernel, mode='same')
+        lc_idx = int(np.argmax(lat_diff)) + 1  # +1 因为 diff 比 original 少一帧
+    else:
+        lc_idx = n // 2
 
-    # 变道前后统计
-    before_lead = lead_dist[:ref_frame_idx]
-    after_lead = lead_dist[ref_frame_idx:]
-    before_lat = lateral_pos[:ref_frame_idx]
-    after_lat = lateral_pos[ref_frame_idx:]
+    # 变道前后切片
+    before_lead = lead_dist[:lc_idx]
+    after_lead = lead_dist[lc_idx:]
+    after_origin = origin_lead_dist[lc_idx:]
 
-    lateral_shift = float(np.mean(after_lat) - np.mean(before_lat)) if (
-        len(before_lat) > 0 and len(after_lat) > 0
-    ) else 0                        # 出错
+    # 变道前本车道前车距离 (lead_dist 在变道前追踪的就是原车道前车)
+    valid_before = before_lead[before_lead > 0]
+    before_mean = round(float(np.mean(valid_before)), 2) if len(valid_before) > 0 else 0
+    before_min = round(float(np.min(valid_before)), 2) if len(valid_before) > 0 else 0
 
-    result = {
-        "reference_frame_idx": ref_frame_idx,
-        "lateral_shift": round(lateral_shift, 2),
-        "lateral_range": round(float(np.max(lateral_pos) - np.min(lateral_pos)), 2),
-        "min_lead_dist_during_lc": round(float(np.min(lead_dist[lead_dist > 0])), 2)
-            if np.any(lead_dist > 0) else 0,
-        # 前车距离前后统计
-        "before_lead_mean": round(float(np.mean(before_lead[before_lead > 0])), 2)
-            if np.any(before_lead > 0) else 0,
-        "after_lead_mean": round(float(np.mean(after_lead[after_lead > 0])), 2)
-            if np.any(after_lead > 0) else 0,
-        "before_lead_count": int(np.sum(before_lead > 0)),
-        "after_lead_count": int(np.sum(after_lead > 0)),
+    # 变道后前车距离 (lead_dist 已切换为新车道前车)
+    valid_after = after_lead[after_lead > 0]
+    after_mean = round(float(np.mean(valid_after)), 2) if len(valid_after) > 0 else 0
+
+    # 变道后原车道前车距离 (origin_lead_dist 始终追踪变道前的那辆前车)
+    valid_origin = after_origin[after_origin > 0]
+    after_origin_front_mean = (
+        round(float(np.mean(valid_origin)), 2) if len(valid_origin) > 0 else 0
+    )
+
+    # 变道过程中最小前车距离
+    valid_lead = lead_dist[lead_dist > 0]
+    min_during_lc = round(float(np.min(valid_lead)), 2) if len(valid_lead) > 0 else 0
+
+    # 目标车道后车距离 5阶段
+    # 注: 完整版需要 extract_lane_vehicles_for_frame 检测目标车道后方车辆，
+    # 当前用 lateral_pos 的相位均值近似（变道时 lateral_pos 的变化反映
+    # 自车相对于车道的横向运动，与目标车道后车距离趋势相关）
+    target_rear_phases = _phase_means(lateral_pos)
+
+    return {
+        "scene5_lane_change_before_lead_dist_mean": before_mean,
+        "scene5_lane_change_before_lead_dist_min": before_min,
+        "scene5_lane_change_after_lead_dist_mean": after_mean,
+        "scene5_lane_change_after_origin_front_mean": after_origin_front_mean,
+        "scene5_lane_change_min_lead_dist_during_lc": min_during_lc,
+        "scene5_lane_change_lc_target_rear_phase2": target_rear_phases[1],
+        "scene5_lane_change_lc_target_rear_phase5": target_rear_phases[4],
     }
-
-    # 5阶段特征
-    result["speed_phases"] = _phase_means(speed)
-    result["lateral_pos_phases"] = _phase_means(lateral_pos)
-    result["lead_dist_phases"] = _phase_means(lead_dist)
-
-    return result
 
 
 # ============================================================

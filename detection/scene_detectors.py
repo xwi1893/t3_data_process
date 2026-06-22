@@ -56,6 +56,20 @@ def _find_lead_agent(agents: list, lead_agent: Optional[dict]) -> Optional[dict]
     return None
 
 
+def _find_agent_by_id(agents: list, agent_id) -> Optional[dict]:
+    """通过 ID 在 agents 列表中查找 agent（不做 mask 过滤）
+
+    用于追踪变道前的原车道前车：变道后该车辆可能不再在当前车道，
+    但只要仍在传感器范围内就应返回其数据。
+    """
+    if not agent_id:
+        return None
+    for a in agents:
+        if a.get('id') == agent_id:
+            return a
+    return None
+
+
 def _extract_lead_from_trajectory(
     ego_traj_pos: list,
     agent: Optional[dict],
@@ -192,6 +206,8 @@ def _extract_history_features(frame: dict, fps: int = 10) -> dict:
                 positions[i][1] if i < len(positions) and len(positions[i]) > 1 else 0.0
             )
 
+    # origin_lead_dist: 历史段已经追踪的是第一帧的前车（即变道前的原车道前车），
+    # 所以 origin_lead_dist = lead_dist
     return {
         'time': time_list,
         'speed': speed_list,
@@ -200,10 +216,11 @@ def _extract_history_features(frame: dict, fps: int = 10) -> dict:
         'lead_dist': lead_dist_list,
         'lead_speed': lead_speed_list,
         'lateral_pos': lateral_pos_list,
+        'origin_lead_dist': list(lead_dist_list),
     }
 
 
-def _extract_future_features(frame: dict, fps: int = 10) -> dict:
+def _extract_future_features(frame: dict, fps: int = 10, origin_lead_id=None) -> dict:
     """从最后一帧的未来数据中提取特征
 
     修复说明:
@@ -259,7 +276,23 @@ def _extract_future_features(frame: dict, fps: int = 10) -> dict:
         agent_vel_future = full_vel[future_start: future_start + future_win] if full_vel else []
         agent_mask_future = full_mask[future_start: future_start + future_win] if full_mask else []
 
-    # 构建特征序列，用局部索引 i 同时索引两个数组
+    # 追踪原车道前车（变道前的前车）在未来轨迹中的距离
+    origin_agent_full = None
+    if origin_lead_id is not None:
+        origin_agent_full = _find_agent_by_id(agents, origin_lead_id)
+
+    origin_pos_future = []
+    origin_mask_future = []
+    if origin_agent_full is not None:
+        origin_full_pos = origin_agent_full.get('pos', [])
+        origin_full_mask = origin_agent_full.get('valid_mask', [])
+        origin_pos_future = origin_full_pos[future_start: future_start + future_win]
+        origin_mask_future = (
+            origin_full_mask[future_start: future_start + future_win]
+            if origin_full_mask else []
+        )
+
+    # 构建特征序列，用局部索引 i 同时索引两个切片
     time_list = []
     speed_list = []
     yaw_list = []
@@ -267,6 +300,7 @@ def _extract_future_features(frame: dict, fps: int = 10) -> dict:
     lead_dist_list = []
     lead_speed_list = []
     lateral_pos_list = []
+    origin_lead_dist_list = []
 
     for i in range(n_steps):
         if i < len(masks) and not masks[i]:
@@ -295,25 +329,41 @@ def _extract_future_features(frame: dict, fps: int = 10) -> dict:
             if i < len(agent_mask_future) and not agent_mask_future[i]:
                 lead_dist_list.append(0.0)
                 lead_speed_list.append(0.0)
-                continue
-
-            ax, ay = agent_pos_future[i]  # agent 未来第 i 帧（局部索引）
-            ex, ey = positions[i]         # 自车 未来第 i 帧（局部索引）
-
-            dist = np.sqrt((ax - ex) ** 2 + (ay - ey) ** 2)
-            if ax - ex > 0 and dist < 200:
-                lead_dist_list.append(dist)
-                if i < len(agent_vel_future):
-                    vx, vy = agent_vel_future[i]
-                    lead_speed_list.append(np.sqrt(vx ** 2 + vy ** 2))
-                else:
-                    lead_speed_list.append(0.0)
             else:
-                lead_dist_list.append(0.0)
-                lead_speed_list.append(0.0)
+                ax, ay = agent_pos_future[i]  # agent 未来第 i 帧（局部索引）
+                ex, ey = positions[i]         # 自车 未来第 i 帧（局部索引）
+
+                dist = np.sqrt((ax - ex) ** 2 + (ay - ey) ** 2)
+                if ax - ex > 0 and dist < 200:
+                    lead_dist_list.append(dist)
+                    if i < len(agent_vel_future):
+                        vx, vy = agent_vel_future[i]
+                        lead_speed_list.append(np.sqrt(vx ** 2 + vy ** 2))
+                    else:
+                        lead_speed_list.append(0.0)
+                else:
+                    lead_dist_list.append(0.0)
+                    lead_speed_list.append(0.0)
         else:
             lead_dist_list.append(0.0)
             lead_speed_list.append(0.0)
+
+        # 原车道前车距离
+        if (origin_agent_full is not None
+                and i < len(origin_pos_future)
+                and i < len(positions)):
+            if i < len(origin_mask_future) and not origin_mask_future[i]:
+                origin_lead_dist_list.append(0.0)
+            else:
+                ax, ay = origin_pos_future[i]
+                ex, ey = positions[i]
+                dist = np.sqrt((ax - ex) ** 2 + (ay - ey) ** 2)
+                if ax - ex > 0 and dist < 200:
+                    origin_lead_dist_list.append(float(dist))
+                else:
+                    origin_lead_dist_list.append(0.0)
+        else:
+            origin_lead_dist_list.append(0.0)
 
     return {
         'time': time_list,
@@ -323,6 +373,7 @@ def _extract_future_features(frame: dict, fps: int = 10) -> dict:
         'lead_dist': lead_dist_list,
         'lead_speed': lead_speed_list,
         'lateral_pos': lateral_pos_list,
+        'origin_lead_dist': origin_lead_dist_list,
     }
 
 
@@ -345,10 +396,11 @@ def _concat_features(
     """
     list_fields = [
         'speed', 'yaw', 'yaw_rate', 'lead_dist', 'lead_speed',
-        'lateral_pos', 'lane_width', 'curvature',
+        'lateral_pos', 'lane_width', 'curvature', 'origin_lead_dist',
     ]
     defaults = {
         'lateral_pos': 0.0, 'lane_width': 3.5, 'curvature': 0.0,
+        'origin_lead_dist': 0.0,
     }
 
     result = {}
@@ -449,8 +501,20 @@ def extract_segment_features(
     has_traffic_light_list = []
     is_turning_list = []
     is_u_turn_list = []
+    origin_lead_dist_list = []
 
     base_time = None
+
+    # 检测第一帧的前车，用于追踪原车道前车（变道前的前车）
+    origin_lead_id = None
+    if valid_frames:
+        first_frame = valid_frames[0][1]
+        first_agents = first_frame.get('data_agent', [])
+        first_lanelines = first_frame.get('data_laneline', [])
+        first_ego_yaw = first_frame.get('data_ego_curr_status', {}).get('yaw', 0.0)
+        first_lead_agent, _, _ = get_lead_vehicle(first_agents, first_lanelines, first_ego_yaw)
+        if first_lead_agent is not None:
+            origin_lead_id = first_lead_agent.get('id')
 
     for i, (fname, frame) in enumerate(valid_frames):
         ego = frame.get('data_ego_curr_status', {})
@@ -492,6 +556,19 @@ def extract_segment_features(
         is_turning_list.append(is_turn)
         is_u_turn_list.append(is_uturn)
 
+        # 原车道前车距离: 通过 ID 在当前帧 agents 中查找第一帧的前车
+        origin_agent = _find_agent_by_id(agents, origin_lead_id)
+        if origin_agent is not None and origin_agent.get('agent_mask', False):
+            ox = origin_agent.get('x', 0.0)
+            oy = origin_agent.get('y', 0.0)
+            od = float(np.sqrt(ox ** 2 + oy ** 2))
+            if ox > 0 and od < 200:
+                origin_lead_dist_list.append(od)
+            else:
+                origin_lead_dist_list.append(0.0)
+        else:
+            origin_lead_dist_list.append(0.0)
+
     speed_arr = np.array(speed_list)
     lead_dist_arr = np.array(lead_dist_list)
 
@@ -514,6 +591,13 @@ def extract_segment_features(
         lead_dist_smooth[valid_speed] / speed_arr[valid_speed], 15.0
     )
 
+    # 原车道前车距离平滑 (与 lead_dist 同样平滑处理)
+    origin_lead_dist_arr = np.array(origin_lead_dist_list)
+    if len(origin_lead_dist_arr) >= smooth_window:
+        origin_lead_smooth = smooth_lead_distance(origin_lead_dist_arr, smooth_window)
+    else:
+        origin_lead_smooth = origin_lead_dist_arr.copy()
+
     current_feats = {
         'speed': speed_list,
         'lead_dist': lead_dist_smooth.tolist(),
@@ -529,6 +613,7 @@ def extract_segment_features(
         'is_turning': is_turning_list,
         'is_u_turn': is_u_turn_list,
         'frame_count': len(valid_frames),
+        'origin_lead_dist': origin_lead_smooth.tolist(),
     }
 
     ext_cfg = WINDOW_EXTENSION
@@ -581,7 +666,7 @@ def extract_segment_features(
 
     if ext_cfg.get("use_future", False) and valid_frames:
         last_frame = valid_frames[-1][1]
-        future_feats = _extract_future_features(last_frame, fps)
+        future_feats = _extract_future_features(last_frame, fps, origin_lead_id=origin_lead_id)
         max_fut = ext_cfg.get("max_future_frames", 30)
         if future_feats and len(future_feats.get('speed', [])) > max_fut:
             for k, v in future_feats.items():

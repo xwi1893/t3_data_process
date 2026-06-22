@@ -1,6 +1,6 @@
 """
 general_features.py
-通用特征提取 (14个特征)
+通用特征提取 (12个特征)
 移植自参考项目 main_extra.py extract_general_features()
 """
 
@@ -14,15 +14,14 @@ def extract_general_features(
 ) -> dict:
     """提取通用特征
 
-    14个特征:
+    12个特征:
     - 速度: avg, var, 95th, 5th
     - 加速度: avg, max, min, std
     - 横向加速度: avg, peak, std
-    - 横摆角速度: avg, peak, std
+    - 制动: max_brake_decel
     """
     speed = direct["speed"]
     acceleration = indirect["acceleration"]
-    yaw_rate = direct["yaw_rate"]
     lateral_acc = indirect["lateral_acc"]
 
     return {
@@ -40,8 +39,6 @@ def extract_general_features(
         "avg_lateral_acc": round(float(np.mean(lateral_acc)), 2),
         "peak_lateral_acc": round(float(np.max(np.abs(lateral_acc))), 2),
         "lateral_acc_std": round(float(np.std(lateral_acc)), 2),
-        # 横摆角速度
-        "avg_yaw_rate": round(float(np.mean(yaw_rate)), 2),
-        "peak_yaw_rate": round(float(np.max(np.abs(yaw_rate))), 2),
-        "yaw_rate_std": round(float(np.std(yaw_rate)), 2),
+        # 制动
+        "max_brake_decel": round(float(np.min(acceleration)), 2),
     }

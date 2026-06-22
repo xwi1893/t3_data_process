@@ -328,10 +328,8 @@ def step5_feature_extraction(features: dict, matched_scenes: list):
     print_kv("peak_lateral_acc", f"{general['peak_lateral_acc']}")
     print_kv("lateral_acc_std", f"{general['lateral_acc_std']}")
 
-    print(f"\n  横摆角速度特征:")
-    print_kv("avg_yaw_rate", f"{general['avg_yaw_rate']}")
-    print_kv("peak_yaw_rate", f"{general['peak_yaw_rate']}")
-    print_kv("yaw_rate_std", f"{general['yaw_rate_std']}")
+    print(f"\n  制动特征:")
+    print_kv("max_brake_decel", f"{general['max_brake_decel']}")
 
     # 场景专用特征
     scene_features = {}
