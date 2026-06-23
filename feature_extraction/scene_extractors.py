@@ -265,6 +265,7 @@ def extract_scene5_features(features: dict) -> dict:
     lead_dist = features["lead_dist"]
     lateral_pos = features["lateral_pos"]
     origin_lead_dist = features.get("origin_lead_dist", lead_dist)
+    target_rear_dist = features.get("target_rear_dist", np.zeros(len(speed)))
 
     n = len(speed)
     if n < 5:
@@ -306,11 +307,10 @@ def extract_scene5_features(features: dict) -> dict:
     valid_lead = lead_dist[lead_dist > 0]
     min_during_lc = round(float(np.min(valid_lead)), 2) if len(valid_lead) > 0 else 0
 
-    # 目标车道后车距离 5阶段
-    # 注: 完整版需要 extract_lane_vehicles_for_frame 检测目标车道后方车辆，
-    # 当前用 lateral_pos 的相位均值近似（变道时 lateral_pos 的变化反映
-    # 自车相对于车道的横向运动，与目标车道后车距离趋势相关）
-    target_rear_phases = _phase_means(lateral_pos)
+    # 目标车道后车距离：自车变道后所在车道与后车的距离，无后车为 0
+    # target_rear_dist 已在特征提取阶段通过检测目标车道后方车辆得到
+    target_rear_dist_arr = np.array(target_rear_dist)
+    target_rear_phases = _phase_means(target_rear_dist_arr)
 
     return {
         "scene5_lane_change_before_lead_dist_mean": before_mean,

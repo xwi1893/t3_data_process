@@ -16,7 +16,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import DETECTION_PARAMS, FEATURE_PARAMS, WINDOW_EXTENSION
 from utils.frame_utils import (
-    get_lead_vehicle, calculate_lateral_position,
+    get_lead_vehicle, get_rear_vehicle, calculate_lateral_position,
     check_has_stopline, check_has_traffic_light,
     get_lane_boundaries, smooth_lead_distance,
 )
@@ -127,6 +127,67 @@ def _extract_lead_from_trajectory(
     return lead_dists, lead_speeds
 
 
+def _extract_rear_per_step(
+    ego_traj_pos: list,
+    agents: list,
+    indices: list,
+    valid_masks: list,
+) -> list:
+    """每个时间步遍历所有 agent，检测当前最近的后车距离
+
+    与 _extract_lead_from_trajectory 不同，后车在变道过程中可能会变化，
+    因此不能追踪单一 agent，而需要每步重新检测。
+
+    Args:
+        ego_traj_pos: 自车轨迹位置 [[x,y], ...]
+        agents: 所有 agent 列表 (含 pos/valid_mask)
+        indices: 要提取的时间步索引列表
+        valid_masks: 每个时间步的有效性掩码
+
+    Returns:
+        rear_dists 列表 (0 表示无后车)
+    """
+    rear_dists = []
+
+    for i, idx in enumerate(indices):
+        # 自车 mask 检查
+        if i < len(valid_masks) and not valid_masks[i]:
+            continue
+
+        if idx >= len(ego_traj_pos):
+            rear_dists.append(0.0)
+            continue
+
+        ex, ey = ego_traj_pos[idx]
+
+        best_rear_dist = 0.0
+        for agent in agents:
+            if agent.get('cls', -1) != 2:
+                continue
+            if not agent.get('agent_mask', False):
+                continue
+
+            agent_pos = agent.get('pos', [])
+            agent_masks = agent.get('valid_mask', [])
+
+            if idx >= len(agent_pos):
+                continue
+            if idx < len(agent_masks) and not agent_masks[idx]:
+                continue
+
+            ax, ay = agent_pos[idx]
+            dist = float(np.sqrt((ax - ex) ** 2 + (ay - ey) ** 2))
+
+            # 只取后方车辆 (ax < ex) 且距离合理
+            if ax - ex < 0 and dist < 200:
+                if best_rear_dist == 0 or dist < best_rear_dist:
+                    best_rear_dist = dist
+
+        rear_dists.append(best_rear_dist)
+
+    return rear_dists
+
+
 def _extract_history_features(frame: dict, fps: int = 10) -> dict:
     """从第一帧的历史数据中提取特征
 
@@ -206,6 +267,11 @@ def _extract_history_features(frame: dict, fps: int = 10) -> dict:
                 positions[i][1] if i < len(positions) and len(positions[i]) > 1 else 0.0
             )
 
+    # 每个时间步检测后车（后车可能在变道过程中发生变化）
+    rear_dists = _extract_rear_per_step(
+        ego_hist_pos, agents, hist_indices, masks[:history_win]
+    )
+
     # origin_lead_dist: 历史段已经追踪的是第一帧的前车（即变道前的原车道前车），
     # 所以 origin_lead_dist = lead_dist
     return {
@@ -217,6 +283,7 @@ def _extract_history_features(frame: dict, fps: int = 10) -> dict:
         'lead_speed': lead_speed_list,
         'lateral_pos': lateral_pos_list,
         'origin_lead_dist': list(lead_dist_list),
+        'target_rear_dist': rear_dists,
     }
 
 
@@ -292,7 +359,7 @@ def _extract_future_features(frame: dict, fps: int = 10, origin_lead_id=None) ->
             if origin_full_mask else []
         )
 
-    # 构建特征序列，用局部索引 i 同时索引两个切片
+    # 构建特征序列，用局部索引 i 同时索引切片
     time_list = []
     speed_list = []
     yaw_list = []
@@ -301,6 +368,7 @@ def _extract_future_features(frame: dict, fps: int = 10, origin_lead_id=None) ->
     lead_speed_list = []
     lateral_pos_list = []
     origin_lead_dist_list = []
+    target_rear_dist_list = []
 
     for i in range(n_steps):
         if i < len(masks) and not masks[i]:
@@ -365,6 +433,28 @@ def _extract_future_features(frame: dict, fps: int = 10, origin_lead_id=None) ->
         else:
             origin_lead_dist_list.append(0.0)
 
+        # 目标车道后车距离：每个时间步遍历所有 agent 检测当前最近后车
+        global_idx = future_start + i
+        ex, ey = positions[i]
+        best_rear_dist = 0.0
+        for agent in agents:
+            if agent.get('cls', -1) != 2:
+                continue
+            if not agent.get('agent_mask', False):
+                continue
+            a_pos = agent.get('pos', [])
+            a_masks = agent.get('valid_mask', [])
+            if global_idx >= len(a_pos):
+                continue
+            if global_idx < len(a_masks) and not a_masks[global_idx]:
+                continue
+            ax, ay = a_pos[global_idx]
+            dist = float(np.sqrt((ax - ex) ** 2 + (ay - ey) ** 2))
+            if ax - ex < 0 and dist < 200:
+                if best_rear_dist == 0 or dist < best_rear_dist:
+                    best_rear_dist = dist
+        target_rear_dist_list.append(best_rear_dist)
+
     return {
         'time': time_list,
         'speed': speed_list,
@@ -374,6 +464,7 @@ def _extract_future_features(frame: dict, fps: int = 10, origin_lead_id=None) ->
         'lead_speed': lead_speed_list,
         'lateral_pos': lateral_pos_list,
         'origin_lead_dist': origin_lead_dist_list,
+        'target_rear_dist': target_rear_dist_list,
     }
 
 
@@ -397,10 +488,11 @@ def _concat_features(
     list_fields = [
         'speed', 'yaw', 'yaw_rate', 'lead_dist', 'lead_speed',
         'lateral_pos', 'lane_width', 'curvature', 'origin_lead_dist',
+        'target_rear_dist',
     ]
     defaults = {
         'lateral_pos': 0.0, 'lane_width': 3.5, 'curvature': 0.0,
-        'origin_lead_dist': 0.0,
+        'origin_lead_dist': 0.0, 'target_rear_dist': 0.0,
     }
 
     result = {}
@@ -502,6 +594,7 @@ def extract_segment_features(
     is_turning_list = []
     is_u_turn_list = []
     origin_lead_dist_list = []
+    target_rear_dist_list = []
 
     base_time = None
 
@@ -569,6 +662,10 @@ def extract_segment_features(
         else:
             origin_lead_dist_list.append(0.0)
 
+        # 目标车道后车距离: 每帧检测当前车道/目标车道后车
+        rear_agent, rear_dist, _ = get_rear_vehicle(agents, lanelines, yaw, direction=0)
+        target_rear_dist_list.append(rear_dist)
+
     speed_arr = np.array(speed_list)
     lead_dist_arr = np.array(lead_dist_list)
 
@@ -598,6 +695,13 @@ def extract_segment_features(
     else:
         origin_lead_smooth = origin_lead_dist_arr.copy()
 
+    # 目标车道后车距离平滑
+    target_rear_dist_arr = np.array(target_rear_dist_list)
+    if len(target_rear_dist_arr) >= smooth_window:
+        target_rear_smooth = smooth_lead_distance(target_rear_dist_arr, smooth_window)
+    else:
+        target_rear_smooth = target_rear_dist_arr.copy()
+
     current_feats = {
         'speed': speed_list,
         'lead_dist': lead_dist_smooth.tolist(),
@@ -614,6 +718,7 @@ def extract_segment_features(
         'is_u_turn': is_u_turn_list,
         'frame_count': len(valid_frames),
         'origin_lead_dist': origin_lead_smooth.tolist(),
+        'target_rear_dist': target_rear_smooth.tolist(),
     }
 
     ext_cfg = WINDOW_EXTENSION
@@ -666,7 +771,10 @@ def extract_segment_features(
 
     if ext_cfg.get("use_future", False) and valid_frames:
         last_frame = valid_frames[-1][1]
-        future_feats = _extract_future_features(last_frame, fps, origin_lead_id=origin_lead_id)
+        future_feats = _extract_future_features(
+            last_frame, fps,
+            origin_lead_id=origin_lead_id,
+        )
         max_fut = ext_cfg.get("max_future_frames", 30)
         if future_feats and len(future_feats.get('speed', [])) > max_fut:
             for k, v in future_feats.items():

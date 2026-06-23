@@ -216,6 +216,101 @@ def get_lead_vehicle(
     return best_lead, best_dist, best_speed
 
 
+def get_rear_vehicle(
+    agents: List[dict],
+    lanelines: List[dict],
+    ego_yaw: float = 0.0,
+    direction: int = 0,
+) -> Tuple[Optional[dict], float, float]:
+    """检测当前车道或目标车道后车
+
+    Args:
+        agents: 周围目标列表 (data_agent)
+        lanelines: 车道线列表 (data_laneline)
+        ego_yaw: 自车航向角
+        direction: 变道方向 (1=左, -1=右, 0=当前车道)
+
+    Returns:
+        (rear_agent, rear_dist, rear_speed)
+        rear_agent 为 None 表示无后车，rear_dist 为 0 表示无后车
+    """
+    if not agents or not lanelines:
+        return None, 0.0, 0.0
+
+    left_bound, right_bound, lane_width = get_lane_boundaries(lanelines)
+
+    if left_bound is None or right_bound is None:
+        return None, 0.0, 0.0
+
+    tolerance = FEATURE_PARAMS.get("lane_vehicle_tolerance", 0.5)
+
+    # 确定目标车道边界
+    if direction == 1:  # 左变道: 目标车道在当前车道左侧
+        target_left = left_bound + lane_width
+        target_right = left_bound
+    elif direction == -1:  # 右变道: 目标车道在当前车道右侧
+        target_left = right_bound
+        target_right = right_bound - lane_width
+    else:  # 当前车道
+        target_left = left_bound
+        target_right = right_bound
+
+    best_rear = None
+    best_dist = float('inf')
+    best_speed = 0.0
+
+    for agent in agents:
+        if agent.get('cls', -1) != 2:
+            continue
+        if not agent.get('agent_mask', False):
+            continue
+
+        agent_x = agent.get('x', 0.0)
+        agent_y = agent.get('y', 0.0)
+        agent_dist = abs(agent_x)
+
+        # 必须在自车后方
+        if agent_x >= 0:
+            continue
+
+        # 检查是否在目标车道内
+        in_lane = False
+        for lane in lanelines:
+            lane_type = lane.get('laneline_type', lane.get('type', 0))
+            if lane_type not in FEATURE_PARAMS["valid_lane_types"]:
+                continue
+            pts = lane.get('pts_fixed_num', [])
+            y_at_agent = interpolate_laneline_y_at_x(pts, agent_x)
+            if y_at_agent is not None:
+                if y_at_agent > 0:
+                    agent_left = y_at_agent
+                    agent_right = agent_left - lane_width
+                else:
+                    agent_right = y_at_agent
+                    agent_left = agent_right + lane_width
+                if (agent_right - tolerance) <= agent_y <= (agent_left + tolerance):
+                    # 检查是否在目标车道范围内
+                    if (target_right - tolerance) <= agent_y <= (target_left + tolerance):
+                        in_lane = True
+                break
+
+        if not in_lane:
+            if (target_right - tolerance) <= agent_y <= (target_left + tolerance):
+                in_lane = True
+
+        if in_lane and agent_dist < best_dist and agent_dist < 200:
+            best_rear = agent
+            best_dist = agent_dist
+            best_speed = np.sqrt(
+                agent.get('vx', 0.0) ** 2 + agent.get('vy', 0.0) ** 2
+            )
+
+    if best_rear is None:
+        return None, 0.0, 0.0
+
+    return best_rear, best_dist, best_speed
+
+
 # ============================================================
 # 横向位置
 # ============================================================
